@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Odoo specific
+*.log
+*.pot
+*.pyc
+*.pyo
+*.swp
+*.tmp
+*.bak
+*.orig
+
+# Byte-compiled / optimized / DLL files
+*.so
+*.egg-info/
+dist/
+build/
+.env
+
+# VSCode / IDE files
+.vscode/
+.idea/
+
