@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- ==========================
+         ZIMRA Configuration Form View
+    =========================== -->
+    <record id="view_zimra_config_form" model="ir.ui.view">
+        <field name="name">zimra.config.form</field>
+        <field name="model">zimra.config</field>
+        <field name="arch" type="xml">
+            <form string="Fiscal Harmony API Configuration">
+                <header>
+                    <button name="test_connection" string="Test Connection" type="object" class="btn-primary"/>
+                    <button name="sync_device_taxes" string="Sync Device Taxes" type="object" class="btn-secondary"/>
+                </header>
+
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="company_id"/>
+                            <field name="active"/>
+                            <field name="userId"/>
+                        </group>
+                        <group>
+                            <field name="api_url"/>
+                            <field name="api_key" password="True"/>
+                            <field name="api_secret" password="True"/>
+                        </group>
+                    </group>
+
+                    <group>
+                        <group string="Configuration Options">
+                            <field name="timeout"/>
+                            <field name="auto_fiscalize"/>
+                            <field name="retry_count"/>
+                        </group>
+                        <group string="Device Tax Sync Status">
+                            <field name="device_taxes_synced" readonly="1" widget="boolean"/>
+                            <field name="last_tax_sync" readonly="1"/>
+                            <field name="last_successful_request" readonly="1"/>
+                        </group>
+                    </group>
+
+                    <notebook>
+                        <!-- ==========================
+                             Tax Mappings Page
+                        =========================== -->
+                        <page string="Tax Mappings">
+                            <field name="tax_mapping_ids"
+                                   context="{'list_view_ref': 'odoo-fiscalharmony-plugin.view_zimra_tax_mapping_list',
+                                             'form_view_ref': 'odoo-fiscalharmony-plugin.view_zimra_tax_mapping_form'}"/>
+                        </page>
+
+                        <!-- ==========================
+                             Currency Mappings Page
+                        =========================== -->
+                        <page string="Currency Mappings">
+                            <field name="currency_mapping_ids"
+                                   context="{'list_view_ref': 'odoo-fiscalharmony-plugin.view_zimra_currency_mapping_list',
+                                             'form_view_ref': 'odoo-fiscalharmony-plugin.view_zimra_currency_mapping_form'}"/>
+                        </page>
+
+                        <!-- ==========================
+                             Statistics & Actions Page
+                        =========================== -->
+                        <page string="Statistics &amp; Actions">
+                            <group>
+                                <group string="Statistics">
+                                    <field name="total_sent" readonly="1"/>
+                                    <field name="total_fiscalized" readonly="1"/>
+                                    <field name="total_failed" readonly="1"/>
+                                </group>
+                                <group string="Actions">
+                                    <button name="action_view_pos_orders" string="View All POS Orders" type="object" class="oe_link"/>
+                                    <button name="action_view_failed_orders" string="View Failed Orders" type="object" class="oe_link"/>
+                                </group>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ==========================
+         ZIMRA Configuration List View
+    =========================== -->
+    <record id="view_zimra_config_list" model="ir.ui.view">
+        <field name="name">zimra.config.list</field>
+        <field name="model">zimra.config</field>
+        <field name="arch" type="xml">
+            <list string="ZIMRA Configurations">
+                <field name="name"/>
+                <field name="company_id"/>
+                <field name="active"/>
+                <field name="userId"/>
+                <field name="device_taxes_synced"/>
+                <field name="last_tax_sync"/>
+                <field name="api_url"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ==========================
+         ZIMRA Tax Mapping Form View
+    =========================== -->
+    <record id="view_zimra_tax_mapping_form" model="ir.ui.view">
+        <field name="name">zimra.tax.mapping.form</field>
+        <field name="model">zimra.tax.mapping</field>
+        <field name="arch" type="xml">
+            <form string="Tax Mapping">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="config_id"/>
+                            <field name="zimra_tax_code"/>
+                            <field name="zimra_tax_name"/>
+                            <field name="zimra_tax_rate"/>
+                        </group>
+                        <group>
+                            <field name="zimra_tax_type"/>
+                            <field name="odoo_tax_id"/>
+                            <field name="is_active"/>
+                        </group>
+                    </group>
+                    <group string="Description">
+                        <field name="tax_description" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ==========================
+         ZIMRA Tax Mapping List View
+    =========================== -->
+    <record id="view_zimra_tax_mapping_list" model="ir.ui.view">
+        <field name="name">zimra.tax.mapping.list</field>
+        <field name="model">zimra.tax.mapping</field>
+        <field name="arch" type="xml">
+            <list string="Tax Mappings" editable="bottom">
+                <field name="config_id"/>
+                <field name="zimra_tax_code"/>
+                <field name="zimra_tax_name"/>
+                <field name="zimra_tax_rate"/>
+                <field name="zimra_tax_type"/>
+                <field name="odoo_tax_id"/>
+                <field name="is_active"/>
+                 <button name="save_line_taxmapping" string="Save" type="object"
+                    icon="fa-save" class="btn-primary"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ==========================
+         ZIMRA Currency Mapping Form View
+    =========================== -->
+    <record id="view_zimra_currency_mapping_form" model="ir.ui.view">
+        <field name="name">zimra.currency.mapping.form</field>
+        <field name="model">zimra.currency.mapping</field>
+        <field name="arch" type="xml">
+            <form string="Currency Mapping">
+                <sheet>
+                    <group>
+                        <field name="odoo_currency_id"/>
+                        <field name="zimra_currency_code"/>
+                        <field name="is_active"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- ==========================
+         ZIMRA Currency Mapping List View
+    =========================== -->
+    <record id="view_zimra_currency_mapping_list" model="ir.ui.view">
+        <field name="name">zimra.currency.mapping.list</field>
+        <field name="model">zimra.currency.mapping</field>
+        <field name="arch" type="xml">
+            <list string="Currency Mappings" editable="bottom">
+                <field name="odoo_currency_id"/>
+                <field name="zimra_currency_code"/>
+                <field name="is_active"/>
+                 <button name="save_line_currencymapping" string="Save" type="object"
+                                            icon="fa-save" class="btn-primary"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ==========================
+         Actions
+    =========================== -->
+    <record id="action_zimra_tax_mapping" model="ir.actions.act_window">
+        <field name="name">Tax Mappings</field>
+        <field name="res_model">zimra.tax.mapping</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No tax mappings found!</p>
+            <p>Applicable taxes are automatically fetched when you sync device taxes from ZIMRA.</p>
+            <p>Map applicable taxes against your own Odoo taxes.</p>
+        </field>
+    </record>
+
+    <record id="action_zimra_config" model="ir.actions.act_window">
+        <field name="name">Fiscal Harmony API Configuration</field>
+        <field name="res_model">zimra.config</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Create your first Fiscal Harmony configuration!</p>
+            <p>Configure your Fiscal Integration API settings including API keys, tax mappings, and currency mappings.</p>
+            <p>Don't forget to save your device taxes and currencies after mapping!</p>
+        </field>
+    </record>
+</odoo>

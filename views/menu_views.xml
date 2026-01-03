@@ -1,0 +1,16 @@
+<odoo>
+    <!-- Optional: Config menu section (use existing if one exists) -->
+    <menuitem id="menu_zimra_config_root"
+              name="Fiscal Harmony"
+              web_icon="fiscalharmony_zimra_intergration/static/description/logo.svg"
+              sequence="100"
+              groups="base.group_user"/>
+
+    <!-- ZIMRA Config submenu item -->
+    <menuitem id="menu_zimra_config_settings"
+              name="Fiscal Harmony API settings"
+              parent="menu_zimra_config_root"
+              action="action_zimra_config"
+              sequence="10"/>
+
+</odoo>

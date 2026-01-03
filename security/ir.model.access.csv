@@ -1,0 +1,5 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_zimra_config,zimra.config,model_zimra_config,base.group_user,1,1,1,1
+access_zimra_tax_mapping,zimra.tax.mapping,model_zimra_tax_mapping,base.group_user,1,1,1,1
+access_zimra_currency_mapping,zimra.currency.mapping,model_zimra_currency_mapping,base.group_user,1,1,1,1
+access_zimra_invoice,zimra.invoice,model_zimra_invoice,base.group_user,1,1,1,1

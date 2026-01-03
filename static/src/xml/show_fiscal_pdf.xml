@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<templates xml:space="preserve">
+    <t t-name="your_module.FiscalPdfViewer" owl="1">
+        <div class="o_fiscal_pdf_viewer">
+            <iframe t-att-src="src" width="100%" height="600px" style="border: none;"></iframe>
+        </div>
+    </t>
+</templates>
