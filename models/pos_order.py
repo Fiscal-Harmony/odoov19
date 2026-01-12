@@ -6,6 +6,8 @@ import logging
 import re
 from datetime import datetime
 
+from odoo.exceptions import UserError
+
 _logger = logging.getLogger(__name__)
 
 
@@ -34,6 +36,11 @@ class PosOrder(models.Model):
     zimra_qr_code = fields.Char(' QR Data', readonly=True, copy=False)
     fiscalized_pdf = fields.Char('Fiscalized Pdf', readonly=True, copy=False)
     zimra_verification_url = fields.Char('ZIMRA Verification URL', readonly=True, copy=False)
+    zimra_attempted = fields.Boolean(
+        string="ZIMRA Attempted",
+        default=False,
+        copy=False
+    )
 
     # Add field to store PDF attachment ID
     fiscal_pdf_attachment_id = fields.Many2one('ir.attachment', 'Fiscal PDF', readonly=True, copy=False)
@@ -84,8 +91,22 @@ class PosOrder(models.Model):
     def _send_to_zimra(self):
         """Send invoice to ZIMRA using signed request from config"""
         self.ensure_one()
+        
 
-        # Check if this invoice ID has already been fiscalized
+        # Skip if name is still the placeholder '/'
+        if not self.name or self.name == '/':
+            if hasattr(self.config_id, 'sequence_id') and self.config_id.sequence_id:
+                # Assign sequence now
+                self.name = self.config_id.sequence_id.next_by_id()
+                _logger.info("Assigned sequence %s to POS order %s", self.name, self.id)
+            else:
+                _logger.warning(
+                    "POS config %s has no sequence. Skipping fiscalization for order %s",
+                    getattr(self.config_id, 'name', 'Unknown'), self.id
+                )
+                return False
+
+                # Check if this invoice ID has already been fiscalized
         existing_fiscalized = self.search([
             ('name', '=', self.name),
             ('zimra_status', '=', 'fiscalized'),
@@ -99,10 +120,9 @@ class PosOrder(models.Model):
             return True
 
         # Get configuration
-        config = self.env['zimra.config'].search([
-            ('company_id', '=', self.company_id.id),
-            ('active', '=', True)
-        ], limit=1)
+        warehouse = self.session_id.config_id.picking_type_id.warehouse_id
+        config = self.env['zimra.config'].get_active_config(warehouse.id)
+        _logger.info("zimra says warehouse is:%s", warehouse)
 
         if not config:
             self.zimra_status = 'failed'
@@ -331,7 +351,8 @@ class PosOrder(models.Model):
         line_items = self.__get_line_items(tax_mappings)
 
         # Check if order has any discounts
-        has_discount = any(line.discount > 0 for line in self.lines)
+        has_discount = any(self.__is_discount_line(line) for line in self.lines)
+
 
         # Create timestamp from order date
         timestamp = self.__create_timestamp(self.date_order)
@@ -342,10 +363,19 @@ class PosOrder(models.Model):
         subtotal = self.amount_total - total_discount
 
         is_refund = self.name.strip().endswith('REFUND')
+        # Ensure order has a valid name
+        if not self.name or self.name == '/':
+            if hasattr(self.config_id, 'sequence_id') and self.config_id.sequence_id:
+                self.name = self.config_id.sequence_id.next_by_id()
+                _logger.info("Assigned sequence name to POS order %s: %s", self.id, self.name)
+            else:
+                _logger.warning("POS config %s has no sequence. Cannot assign order name.", self.config_id.name)
+
+        invoice_name= self.name
 
         data = {
-            "InvoiceId": self.name,
-            "InvoiceNumber": self.name,
+            "InvoiceId": invoice_name,
+            "InvoiceNumber": invoice_name,
             "Reference": self.pos_reference or "",
             "IsDiscounted": has_discount,
             "IsTaxInclusive": True,
@@ -497,76 +527,101 @@ class PosOrder(models.Model):
 
         return {
             "Name": self.partner_id.name,
-            "Tin": tin,
-            "VatNumber": vat,
-            "Address": self._get_customer_address(),
-            "Phone": self.partner_id.phone or "",
-            "Email": self.partner_id.email or ""
+            "Tin": tin or None,
+            "VatNumber": vat or None,
+            "Address": self._get_customer_address() or None,
+            "Phone": self.partner_id.phone or None,
+            "Email": self.partner_id.email or None,
         }
 
     def __get_line_items(self, tax_mappings):
-        """Get line items in ZIMRA format"""
-        line_items = []
+        """ZIMRA line items without discount-only lines"""
+
+        # --- Separate product lines and receipt discounts ---
+        product_lines = []
+        receipt_discount_total = 0.0
 
         for line in self.lines:
-            # Calculate tax information using Odoo's tax computation
-            tax_amount = 0
+            if self.__is_receipt_discount_line(line):
+                receipt_discount_total += abs(line.price_subtotal_incl)
+            else:
+                product_lines.append(line)
+
+        # Total before receipt discount
+        total_before_discount = sum(
+            l.price_subtotal_incl for l in product_lines
+        ) or 1.0  # avoid division by zero
+
+        line_items = []
+
+        for line in product_lines:
+            # --- Tax code ---
             tax_code = ""
+            for tax in line.tax_ids:
+                if tax.id in tax_mappings:
+                    tax_code = tax_mappings[tax.id].zimra_tax_code
+                    break
 
-            if line.tax_ids:
-                # Use Odoo's tax computation
-                tax_results = line.tax_ids.compute_all(
-                    price_unit=line.price_unit,
-                    quantity=line.qty,
-                    product=line.product_id,
-                    partner=self.partner_id if hasattr(self, 'partner_id') else None
-                )
+            # --- Name & HS code ---
+            name = line.product_id.name or ""
+            hscode = ""
+            match = re.search(r'\b\d{8,}\b', name)
+            if match:
+                hscode = match.group()
+                name = re.sub(r'\b' + re.escape(hscode) + r'\b', '', name).strip()
 
-                tax_amount = tax_results['total_included'] - tax_results['total_excluded']
+            # --- Proportional discount allocation ---
+            proportional_discount = (
+                    receipt_discount_total
+                    * (line.price_subtotal_incl / total_before_discount)
+            )
 
-                # Get tax code from mapping
-                for tax in line.tax_ids:
-                    if tax.id in tax_mappings:
-                        tax_mapping = tax_mappings[tax.id]
-                        tax_code = tax_mapping.zimra_tax_code
-                        break
+            final_line_amount = line.price_subtotal_incl - proportional_discount
 
-            # Safely split product name into name and hscode
-            try:
-                match = re.search(r'\b\d{8,}\b', line.product_id.name)
-                if match:
-                    hscode = match.group()
-                    # Remove the HS code from the name
-                    name = re.sub(r'\b' + re.escape(hscode) + r'\b', '', line.product_id.name).strip()
-                    # Clean up multiple spaces
-                    name = re.sub(r'\s+', ' ', name)
-                else:
-                    name = line.product_id.name
-                    hscode = ''
-            except ValueError:
-                name = line.product_id.name
-                hscode = ''
+            # --- Product discount (line-level) ---
+            line_discount = (
+                line.price_unit * line.qty * line.discount / 100
+                if line.discount else 0
+            )
 
-            # Calculate discount if applicable
-            discount_amount = 0
-            if line.discount:
-                discount_amount = line.price_unit * line.qty * line.discount / 100
-
-            # Build the line item
-            unit_amtbefore = line.price_subtotal_incl / line.qty
-            line_item = {
+            line_items.append({
                 "Description": name,
-                "UnitAmount": f"{abs(unit_amtbefore + discount_amount):.3f}",
+                "UnitAmount": f"{abs(line.price_unit):.3f}",
                 "TaxCode": tax_code,
                 "ProductCode": hscode,
-                "LineAmount": f"{abs(line.price_subtotal_incl):.2f}",
-                "DiscountAmount": f"{abs(discount_amount):.2f}",
+                "LineAmount": f"{abs(final_line_amount):.2f}",
+                "DiscountAmount": f"{abs(line_discount + proportional_discount):.2f}",
                 "Quantity": f"{abs(line.qty):.3f}",
-            }
-
-            line_items.append(line_item)
+            })
 
         return line_items
+
+    def __is_receipt_discount_line(self, line):
+        name = (line.product_id.name or "").lower()
+        return (
+                '%' in name
+                or 'discount' in name
+                or 'loyalty' in name
+                or line.price_subtotal_incl < 0
+        )
+
+    def __is_discount_line(self, line):
+        """Return True if this line represents a discount/loyalty"""
+        # 1. Check if the line has a discount percent applied
+        if line.discount and line.discount > 0:
+            return True
+
+        # 2. Check if product name indicates a discount/loyalty
+        name = line.product_id.name.lower() if line.product_id else ""
+        discount_keywords = ['discount', 'loyalty', 'voucher', '% off']
+        if any(k in name for k in discount_keywords):
+            return True
+
+        # 3. Optional: check for negative price lines (refund/discount)
+        if line.price_subtotal_incl < 0:
+            return True
+
+        return False
 
     def _get_customer_address(self):
         """Get customer address as a structured dictionary"""
@@ -600,14 +655,14 @@ class PosOrder(models.Model):
 
         # Auto-fiscalize if configuration allows and order is paid/invoiced/done
         # Don't fiscalize draft orders (quotations)
-        if order.state in ['paid', 'invoiced', 'done']:
-            config = self.env['zimra.config'].search([
+       # if order.state in ['paid', 'invoiced', 'done']:
+        config = self.env['zimra.config'].search([
                 ('company_id', '=', order.company_id.id),
                 ('active', '=', True),
                 ('auto_fiscalize', '=', True)
             ], limit=1)
 
-            if config:
+        if config:
                 result = order._send_to_zimra()
 
                 if not result:
@@ -615,99 +670,90 @@ class PosOrder(models.Model):
 
         return order
 
-    def write(self, vals):
-        """Override write to auto-fiscalize when paid"""
-        # Store old states before update
-        old_states = {order.id: order.state for order in self}
 
-        result = super(PosOrder, self).write(vals)
-
-        if 'state' in vals and vals['state'] == 'paid':
-            for order in self:
-                # Only fiscalize if transitioning FROM a non-paid state TO paid
-                # This prevents re-fiscalization of quotations that become orders
-                old_state = old_states.get(order.id)
-
-                # Skip if already fiscalized or if was already paid
-                if order.zimra_status == 'pending' and old_state not in ['paid', 'done', 'invoiced']:
-                    config = self.env['zimra.config'].search([
-                        ('company_id', '=', order.company_id.id),
-                        ('active', '=', True),
-                        ('auto_fiscalize', '=', True)
-                    ], limit=1)
-
-                    if config:
-                        fiscalize_result = order._send_to_zimra()
-                        if not fiscalize_result:
-                            _logger.error(f"Auto-fiscalization failed for order {order.name}")
-
-        return result
 
     @api.model
+    @api.model
     def create_from_ui(self, orders, draft=False):
-        """Intercept POS orders from UI and auto-fiscalize refunds."""
-        _logger.info("Intercepting POS order creation for fiscalizing")
-
-        # Mark potential refund orders in the raw input
-        for order_data in orders:
-            lines = order_data.get('data', {}).get('lines', [])
-            refund_detected = all(
-                isinstance(line, (list, tuple)) and len(line) == 3 and line[2].get('qty', 0) < 0
-                for line in lines
-            )
-            if refund_detected:
-                _logger.info("Refund POS order flagged before creation: %s", order_data.get('data', {}).get('name'))
-                order_data['data']['is_refund'] = True  # Optional tag
-
-        # Create the orders
+        """Intercept POS orders from UI and defer fiscalization until order has proper name"""
         created_result = super().create_from_ui(orders, draft=draft)
 
-        # Handle both cases: IDs or recordset
-        try:
-            # If created_result contains IDs, convert to recordset
-            if created_result and isinstance(created_result, (list, tuple)) and isinstance(created_result[0], int):
-                order_records = self.browse(created_result)
-            else:
-                # Assume it's already a recordset or list of records
-                order_records = created_result
+        if created_result and isinstance(created_result, (list, tuple)) and isinstance(created_result[0], int):
+            order_records = self.browse(created_result)
+        else:
+            order_records = created_result
 
-            # Process each order for fiscalization
-            for order in order_records:
-                try:
-                    # Verify this is actually a record object
-                    if not hasattr(order, 'amount_total'):
-                        _logger.warning("Invalid order record in create_from_ui")
-                        return created_result
-
-                    # Only process refunds that are in paid state
-                    if order.amount_total < 0 and order.state in ['paid', 'done', 'invoiced']:
-                        _logger.info("Detected refund order after creation: %s", order.name)
-
-                        config = self.env['zimra.config'].search([
-                            ('company_id', '=', order.company_id.id),
-                            ('active', '=', True),
-                            ('auto_fiscalize', '=', True)
-                        ], limit=1)
-
-                        if config:
-                            result = order._send_to_zimra()
-                            if not result:
-                                _logger.error("Auto-fiscalization failed for refund order %s", order.name)
-                        else:
-                            _logger.warning("No active ZIMRA config found for company %s", order.company_id.name)
-
-                except Exception as e:
-                    # Safe error logging
-                    try:
-                        order_name = order.name if hasattr(order, 'name') else str(order)
-                    except:
-                        order_name = "Unknown Order"
-                    _logger.exception("Unexpected error fiscalizing refund order %s: %s", order_name, str(e))
-
-        except Exception as e:
-            _logger.exception("Error processing created orders for fiscalization: %s", str(e))
-
+        for order in order_records:
+            try:
+                # Defer fiscalization until name is valid
+                if order.name == '/' or not order.name:
+                    _logger.info("Deferring fiscalization for order %s", order.id)
+                    # you can call a deferred job or just rely on write override later
+                    continue
+                # Optionally, trigger fiscalization for already named orders
+               # order._send_to_zimra()
+            except Exception as e:
+                _logger.exception("Error scheduling fiscalization for order %s: %s",
+                                  getattr(order, 'name', 'Unknown'), str(e))
         return created_result
+
+    def write(self, vals):
+        res = super().write(vals)
+
+        for order in self:
+            # HARD GUARDS — stop loops
+            if order.zimra_attempted:
+                continue
+
+            if not order.name or order.name == '/':
+                continue
+
+            if order.state not in ['paid', 'done', 'invoiced']:
+                continue
+
+            if order.zimra_status not in ['pending', False]:
+                continue
+
+            # Lock BEFORE calling send
+            order.zimra_attempted = True
+
+            _logger.info(
+                "Triggering fiscalization ONCE for order %s",
+                order.name
+            )
+
+            order._send_to_zimra()
+
+        return res
+
+    def _deferred_fiscalization(self):
+        """Trigger fiscalization only if order has a valid name and config"""
+        self.ensure_one()
+
+        if not self.name or self.name == '/':
+            _logger.info("Order %s not ready for fiscalization yet. Will retry later.", self.id)
+            return False
+
+        if self.state not in ['paid', 'done', 'invoiced']:
+            _logger.info("Order %s not in posted state. Skipping fiscalization.", self.id)
+            return False
+
+        warehouse = self.session_id.config_id.warehouse_id
+        if not warehouse:
+            raise UserError("No warehouse configured on this POS.")
+
+        config = self.env['zimra.config'].get_active_config(warehouse.id)
+        if not config:
+            raise UserError(
+                ("No active ZIMRA config found for warehouse %s") % warehouse.name
+            )
+
+        if not config:
+            _logger.warning("No active ZIMRA config found for company %s", self.company_id.name)
+            return False
+
+        # Trigger fiscalization
+        return self._send_to_zimra()
 
     def action_view_zimra_logs(self):
         """View ZIMRA logs for this order"""

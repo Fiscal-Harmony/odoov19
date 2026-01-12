@@ -14,11 +14,28 @@
                 </header>
 
                 <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button class="oe_stat_button" type="object" name="action_view_pos_orders" icon="fa-shopping-cart">
+                            <field string="POS Orders" name="total_sent" widget="statinfo"/>
+                        </button>
+                        <button class="oe_stat_button" type="object" name="action_view_failed_orders" icon="fa-exclamation-triangle">
+                            <field string="Failed" name="total_failed" widget="statinfo"/>
+                        </button>
+                    </div>
+
+                    <div class="oe_title">
+                        <label for="name" class="oe_edit_only"/>
+                        <h1>
+                            <field name="name" placeholder="e.g., Main Branch Configuration"/>
+                        </h1>
+                    </div>
+
                     <group>
                         <group>
-                            <field name="name"/>
-                            <field name="company_id"/>
+                            <field name="company_id" options="{'no_create': True}"
+                                   help="Each company/branch requires its own configuration"/>
                             <field name="active"/>
+                            <field name="warehouse_id" options="{'no_create':True}"/>
                             <field name="userId"/>
                         </group>
                         <group>
@@ -47,8 +64,9 @@
                         =========================== -->
                         <page string="Tax Mappings">
                             <field name="tax_mapping_ids"
-                                   context="{'list_view_ref': 'odoo-fiscalharmony-plugin.view_zimra_tax_mapping_list',
-                                             'form_view_ref': 'odoo-fiscalharmony-plugin.view_zimra_tax_mapping_form'}"/>
+                                   context="{'default_config_id': id,
+                                             'list_view_ref': 'fiscalharmony.view_zimra_tax_mapping_list',
+                                             'form_view_ref': 'fiscalharmony.view_zimra_tax_mapping_form'}"/>
                         </page>
 
                         <!-- ==========================
@@ -56,23 +74,20 @@
                         =========================== -->
                         <page string="Currency Mappings">
                             <field name="currency_mapping_ids"
-                                   context="{'list_view_ref': 'odoo-fiscalharmony-plugin.view_zimra_currency_mapping_list',
-                                             'form_view_ref': 'odoo-fiscalharmony-plugin.view_zimra_currency_mapping_form'}"/>
+                                   context="{'default_config_id': id,
+                                             'list_view_ref': 'fiscalharmony.view_zimra_currency_mapping_list',
+                                             'form_view_ref': 'fiscalharmony.view_zimra_currency_mapping_form'}"/>
                         </page>
 
                         <!-- ==========================
-                             Statistics & Actions Page
+                             Statistics Page
                         =========================== -->
-                        <page string="Statistics &amp; Actions">
+                        <page string="Statistics">
                             <group>
-                                <group string="Statistics">
+                                <group string="Fiscalization Statistics">
                                     <field name="total_sent" readonly="1"/>
                                     <field name="total_fiscalized" readonly="1"/>
                                     <field name="total_failed" readonly="1"/>
-                                </group>
-                                <group string="Actions">
-                                    <button name="action_view_pos_orders" string="View All POS Orders" type="object" class="oe_link"/>
-                                    <button name="action_view_failed_orders" string="View Failed Orders" type="object" class="oe_link"/>
                                 </group>
                             </group>
                         </page>
@@ -92,14 +107,20 @@
             <list string="ZIMRA Configurations">
                 <field name="name"/>
                 <field name="company_id"/>
-                <field name="active"/>
+                <field name="active" widget="boolean_toggle"/>
                 <field name="userId"/>
-                <field name="device_taxes_synced"/>
+                <field name="device_taxes_synced" widget="badge" decoration-success="device_taxes_synced == True" decoration-danger="device_taxes_synced == False"/>
                 <field name="last_tax_sync"/>
-                <field name="api_url"/>
+                <field name="total_fiscalized" string="Fiscalized"/>
+                <field name="total_failed" string="Failed" decoration-danger="total_failed > 0"/>
             </list>
         </field>
     </record>
+
+    <!-- ==========================
+         ZIMRA Configuration Search View
+    =========================== -->
+
 
     <!-- ==========================
          ZIMRA Tax Mapping Form View
@@ -112,14 +133,14 @@
                 <sheet>
                     <group>
                         <group>
-                            <field name="config_id"/>
+                            <field name="config_id" readonly="1"/>
                             <field name="zimra_tax_code"/>
                             <field name="zimra_tax_name"/>
                             <field name="zimra_tax_rate"/>
                         </group>
                         <group>
                             <field name="zimra_tax_type"/>
-                            <field name="odoo_tax_id"/>
+                            <field name="odoo_tax_id" domain="[('company_id', '=', parent.company_id)]"/>
                             <field name="is_active"/>
                         </group>
                     </group>
@@ -139,14 +160,14 @@
         <field name="model">zimra.tax.mapping</field>
         <field name="arch" type="xml">
             <list string="Tax Mappings" editable="bottom">
-                <field name="config_id"/>
+                <field name="config_id" readonly="1" optional="hide"/>
                 <field name="zimra_tax_code"/>
                 <field name="zimra_tax_name"/>
                 <field name="zimra_tax_rate"/>
                 <field name="zimra_tax_type"/>
                 <field name="odoo_tax_id"/>
-                <field name="is_active"/>
-                 <button name="save_line_taxmapping" string="Save" type="object"
+                <field name="is_active" widget="boolean_toggle"/>
+                <button name="save_line_taxmapping" string="Save" type="object"
                     icon="fa-save" class="btn-primary"/>
             </list>
         </field>
@@ -162,6 +183,7 @@
             <form string="Currency Mapping">
                 <sheet>
                     <group>
+                        <field name="config_id" readonly="1"/>
                         <field name="odoo_currency_id"/>
                         <field name="zimra_currency_code"/>
                         <field name="is_active"/>
@@ -179,11 +201,12 @@
         <field name="model">zimra.currency.mapping</field>
         <field name="arch" type="xml">
             <list string="Currency Mappings" editable="bottom">
+                <field name="config_id" readonly="1" optional="hide"/>
                 <field name="odoo_currency_id"/>
                 <field name="zimra_currency_code"/>
-                <field name="is_active"/>
-                 <button name="save_line_currencymapping" string="Save" type="object"
-                                            icon="fa-save" class="btn-primary"/>
+                <field name="is_active" widget="boolean_toggle"/>
+                <button name="save_line_currencymapping" string="Save" type="object"
+                    icon="fa-save" class="btn-primary"/>
             </list>
         </field>
     </record>
@@ -195,6 +218,7 @@
         <field name="name">Tax Mappings</field>
         <field name="res_model">zimra.tax.mapping</field>
         <field name="view_mode">list,form</field>
+        <field name="context">{'search_default_current_company': 1}</field>
         <field name="help" type="html">
             <p class="o_view_nocontent_smiling_face">No tax mappings found!</p>
             <p>Applicable taxes are automatically fetched when you sync device taxes from ZIMRA.</p>
@@ -203,13 +227,21 @@
     </record>
 
     <record id="action_zimra_config" model="ir.actions.act_window">
-        <field name="name">Fiscal Harmony API Configuration</field>
+        <field name="name">Fiscal Harmony Configurations</field>
         <field name="res_model">zimra.config</field>
         <field name="view_mode">list,form</field>
+        <field name="context">{'search_default_active': 1, 'search_default_current_company': 1}</field>
         <field name="help" type="html">
             <p class="o_view_nocontent_smiling_face">Create your first Fiscal Harmony configuration!</p>
+            <p>Each company/branch requires its own configuration.</p>
             <p>Configure your Fiscal Integration API settings including API keys, tax mappings, and currency mappings.</p>
-            <p>Don't forget to save your device taxes and currencies after mapping!</p>
+            <p><strong>Note:</strong> Switch to the desired company/branch before creating a configuration.</p>
         </field>
     </record>
+
+
+
+
+
+
 </odoo>

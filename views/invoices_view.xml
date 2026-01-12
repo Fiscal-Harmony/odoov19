@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-
-    <!-- ===================== -->
-    <!-- LIST VIEW -->
-    <!-- ===================== -->
+    <!-- List View -->
     <record id="view_zimra_invoice_list" model="ir.ui.view">
         <field name="name">zimra.invoice.list</field>
         <field name="model">zimra.invoice</field>
@@ -28,15 +25,14 @@
                 <button name="open_downloaded_invoice"
                         type="object"
                         icon="fa-eye"
-                        title="View Invoice"
-                        invisible="status in ('failed','cancelled','pending')"/>
+                        string=""
+                        invisible="status in ('failed','cancelled','pending')"
+                        title="View Invoice"/>
             </list>
         </field>
     </record>
 
-    <!-- ===================== -->
-    <!-- FORM VIEW -->
-    <!-- ===================== -->
+    <!-- Form View -->
     <record id="view_zimra_invoice_form" model="ir.ui.view">
         <field name="name">zimra.invoice.form</field>
         <field name="model">zimra.invoice</field>
@@ -49,31 +45,25 @@
                             class="btn-primary"
                             invisible="status not in ('failed','cancelled')"/>
 
-                    <field name="status"
-                           widget="statusbar"
-                           statusbar_visible="pending,sent,fiscalized"/>
+                    <field name="status" widget="statusbar" statusbar_visible="pending,sent,fiscalized"/>
                 </header>
-
                 <sheet>
-
-                    <!-- Stats buttons -->
-                    <div class="oe_button_box" name="stats_box">
-                        <button name="action_view_pos_orders" type="object"
-                                class="oe_stat_button" icon="fa-shopping-cart">
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_view_pos_orders" type="object" class="oe_stat_button"
+                                icon="fa-shopping-cart">
                             <field name="total_sent" widget="statinfo" string="Total Sent"/>
                         </button>
-                        <button name="action_view_failed_orders" type="object"
-                                class="oe_stat_button" icon="fa-exclamation-triangle">
+                        <button name="action_view_failed_orders" type="object" class="oe_stat_button"
+                                icon="fa-exclamation-triangle">
                             <field name="total_failed" widget="statinfo" string="Failed"/>
                         </button>
-                        <button name="action_view_pos_orders" type="object"
-                                class="oe_stat_button" icon="fa-check-circle">
+                        <button name="action_view_pos_orders" type="object" class="oe_stat_button"
+                                icon="fa-check-circle">
                             <field name="total_fiscalized" widget="statinfo" string="Fiscalized"/>
                         </button>
                     </div>
 
-                    <!-- POS Order -->
-                    <div class="oe_button_box" name="pos_box">
+                    <div class="oe_button_box" name="button_box">
                         <button name="action_view_pos_order"
                                 type="object"
                                 class="oe_stat_button"
@@ -92,12 +82,12 @@
                     </div>
 
                     <group>
-                        <group>
+                        <group name="invoice_info">
                             <field name="pos_order_id"/>
                             <field name="zimra_fiscal_number"/>
                             <field name="company_id" groups="base.group_multi_company"/>
                         </group>
-                        <group>
+                        <group name="status_info">
                             <field name="retry_count"/>
                             <field name="duration" widget="float_time"/>
                             <field name="sent_date"/>
@@ -106,26 +96,24 @@
                     </group>
 
                     <notebook>
-                        <page string="Request Data">
+                        <page string="Request Data" name="request_data">
                             <group>
-                                <field name="request_data" widget="ace"
-                                       options="{'mode': 'json'}" nolabel="1"/>
+                                <field name="request_data" widget="ace" options="{'mode': 'json'}" nolabel="1"/>
                             </group>
                         </page>
-                        <page string="Response Data">
+                        <page string="Response Data" name="response_data">
                             <group>
-                                <field name="response_data" widget="ace"
-                                       options="{'mode': 'json'}" nolabel="1"/>
+                                <field name="response_data" widget="ace" options="{'mode': 'json'}" nolabel="1"/>
                             </group>
                         </page>
-                        <page string="Error Details" invisible="not error_message">
+                        <page string="Error Details" name="error_details"
+                              invisible="not error_message">
                             <group>
                                 <field name="error_message" nolabel="1"/>
                             </group>
                         </page>
                     </notebook>
                 </sheet>
-
                 <div class="oe_chatter">
                     <field name="message_follower_ids"/>
                     <field name="activity_ids"/>
@@ -140,9 +128,7 @@
     <!-- ===================== -->
 
 
-    <!-- ===================== -->
-    <!-- KANBAN VIEW -->
-    <!-- ===================== -->
+    <!-- Kanban View -->
     <record id="view_zimra_invoice_kanban" model="ir.ui.view">
         <field name="name">zimra.invoice.kanban</field>
         <field name="model">zimra.invoice</field>
@@ -156,11 +142,55 @@
                 <field name="error_message"/>
                 <field name="create_date"/>
                 <field name="fiscalized_date"/>
-
                 <templates>
                     <t t-name="kanban-box">
                         <div class="oe_kanban_card oe_kanban_global_click">
-                            <strong><field name="name"/></strong>
+                            <div class="o_kanban_record_top">
+                                <div class="o_kanban_record_headings">
+                                    <strong class="o_kanban_record_title">
+                                        <field name="name"/>
+                                    </strong>
+                                    <br/>
+                                    <span class="o_kanban_record_subtitle">
+                                        <field name="pos_order_id"/>
+                                    </span>
+                                </div>
+                                <div class="o_kanban_record_top_right">
+                                    <field name="status" widget="label_selection"
+                                           options="{'classes': {
+                                               'pending': 'warning',
+                                               'sent': 'info',
+                                               'fiscalized': 'success',
+                                               'failed': 'danger',
+                                               'cancelled': 'default'
+                                           }}"/>
+                                </div>
+                            </div>
+                            <div class="o_kanban_record_body">
+                                <div t-if="record.zimra_fiscal_number.raw_value">
+                                    <i class="fa fa-barcode" title="Fiscal Number"/>
+                                    <field name="zimra_fiscal_number"/>
+                                </div>
+                                <div t-if="record.retry_count.raw_value and record.retry_count.raw_value > 0">
+                                    <i class="fa fa-refresh" title="Retries"/>
+                                    Retries: <field name="retry_count"/>
+                                </div>
+                                <div t-if="record.error_message.raw_value">
+                                    <i class="fa fa-exclamation-triangle text-danger" title="Error"/>
+                                    Error
+                                </div>
+                            </div>
+                            <div class="o_kanban_record_bottom">
+                                <div class="oe_kanban_bottom_left">
+                                    <field name="create_date" widget="date"/>
+                                </div>
+                                <div class="oe_kanban_bottom_right">
+                                    <div t-if="record.fiscalized_date.raw_value">
+                                        <i class="fa fa-check-circle text-success" title="Fiscalized"/>
+                                        Fiscalized
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </t>
                 </templates>
@@ -168,4 +198,108 @@
         </field>
     </record>
 
+    <!-- Actions and Menus -->
+    <record id="action_zimra_invoice" model="ir.actions.act_window">
+        <field name="name">Invoices</field>
+        <field name="res_model">zimra.invoice</field>
+        <field name="view_mode">list,form,kanban</field>
+        
+        <field name="context">{}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No ZIMRA invoices found!</p>
+            <p>Invoices are automatically created when POS orders are fiscalized.</p>
+        </field>
+    </record>
+
+    <menuitem id="menu_zimra_invoice" name="Fiscal Invoices" parent="menu_zimra_config_root"
+              action="action_zimra_invoice" sequence="20"/>
+
+    <!-- Failed Invoices -->
+    <record id="action_zimra_invoice_failed" model="ir.actions.act_window">
+        <field name="name">Failed ZIMRA Invoices</field>
+        <field name="res_model">zimra.invoice</field>
+        <field name="view_mode">list,form,kanban</field>
+        <field name="domain">[('status', '=', 'failed')]</field>
+        <field name="context">{'search_default_failed': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No failed invoices!</p>
+            <p>This view shows invoices that failed during fiscalization. You can retry fiscalization from the form view.</p>
+        </field>
+    </record>
+    <menuitem id="menu_zimra_invoice_failed" name="Failed Invoices" parent="menu_zimra_invoice"
+              action="action_zimra_invoice_failed" sequence="10"/>
+
+    <!-- Pending Invoices -->
+    <record id="action_zimra_invoice_pending" model="ir.actions.act_window">
+        <field name="name">Pending Invoices</field>
+        <field name="res_model">zimra.invoice</field>
+        <field name="view_mode">list,form,kanban</field>
+        <field name="domain">[('status', '=', 'pending')]</field>
+        <field name="context">{'search_default_pending': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No pending ZIMRA invoices!</p>
+            <p>This view shows invoices waiting for fiscalization.</p>
+        </field>
+    </record>
+    <menuitem id="menu_zimra_invoice_pending" name="Pending Invoices" parent="menu_zimra_invoice"
+              action="action_zimra_invoice_pending" sequence="5"/>
+
+    <!-- Fiscalized Invoices -->
+    <record id="action_zimra_invoice_fiscalized" model="ir.actions.act_window">
+        <field name="name">Fiscalized Invoices</field>
+        <field name="res_model">zimra.invoice</field>
+        <field name="view_mode">list,form,kanban</field>
+        <field name="domain">[('status', '=', 'fiscalized')]</field>
+        <field name="context">{'search_default_fiscalized': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No fiscalized invoices!</p>
+            <p>This view displays all successfully fiscalized invoices.</p>
+        </field>
+    </record>
+    <menuitem id="menu_zimra_invoice_fiscalized" name="Fiscalized Invoices" parent="menu_zimra_invoice"
+              action="action_zimra_invoice_fiscalized" sequence="15"/>
+
+    <!-- Never Fiscalized Accounting Invoices -->
+    <record id="action_accounting_invoice_never_fiscalized" model="ir.actions.act_window">
+        <field name="name">Accounting Invoices</field>
+        <field name="res_model">account.move</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('move_type', 'in', ['out_invoice', 'out_refund']), ('state', '=', 'posted')]</field>
+        <field name="context">{'search_default_never_fiscalized': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No accounting invoices that were never fiscalized!</p>
+            <p>This view shows posted customer invoices and credit notes that have never been sent for fiscalization to ZIMRA.</p>
+        </field>
+    </record>
+    <menuitem id="menu_zimra_invoice_never_fiscalized" name="Accounting Invoices"
+              parent="menu_zimra_invoice" action="action_accounting_invoice_never_fiscalized" sequence="25"/>
+
+    <!-- Inherit account.move form view to add fiscalize buttons -->
+    <record id="view_account_move_form_inherit_zimra" model="ir.ui.view">
+        <field name="name">account.move.form.inherit.zimra</field>
+        <field name="model">account.move</field>
+        <field name="inherit_id" ref="account.view_move_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+                <field name="zimra_status" invisible="1"/>
+            </xpath>
+
+            <xpath expr="//header" position="inside">
+                <button name="action_fiscalize_invoice"
+                        string="Fiscalize Invoice"
+                        type="object"
+                        class="btn-primary"
+                        invisible="move_type not in ('out_invoice', 'out_refund') or state != 'posted' or zimra_status in ('fiscalized', 'sent')"
+                        confirm="Are you sure you want to fiscalize this invoice with ZIMRA?"/>
+            </xpath>
+
+            <xpath expr="//header" position="inside">
+                <button name="action_download_fiscal_pdf"
+                        string="Download Fiscal Invoice"
+                        type="object"
+                        class="btn-primary"
+                        invisible="zimra_status not in ('fiscalized')"/>
+            </xpath>
+        </field>
+    </record>
 </odoo>

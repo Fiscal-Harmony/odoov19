@@ -181,11 +181,17 @@ class AccountMove(models.Model):
                 _logger.info(f"Invoice {self.name} marked as exempted from fiscalization")
                 return True
 
-            # Prepare ZIMRA invoice data
-            invoice_data = self._prepare_zimra_invoice_data(config)
+
+
+            try:
+                invoice_data = self._prepare_zimra_invoice_data(config)
+            except Exception as e:
+                # This will capture the actual error and include it in the failed message
+                self._mark_as_failed(f'Failed to prepare invoice data : {e}')
+                return False
 
             if not invoice_data:
-                self._mark_as_failed('Failed to prepare invoice data for ZIMRA')
+                self._mark_as_failed('Failed to prepare invoice data for ZIMRA: returned empty or None')
                 return False
 
             # Create invoice log
@@ -339,14 +345,16 @@ class AccountMove(models.Model):
         return True
 
     def _get_active_zimra_config(self):
-        """Get active ZIMRA configuration for the company"""
+        """Get active ZIMRA configuration using only the warehouse"""
+
+
         config = self.env['zimra.config'].search([
             ('company_id', '=', self.company_id.id),
             ('active', '=', True)
         ], limit=1)
 
         if not config:
-            _logger.error(f"No active ZIMRA configuration found for company {self.company_id.name}")
+            _logger.error(f"No active ZIMRA configuration found for Company {self.company_id.name}")
 
         return config
 
@@ -376,7 +384,17 @@ class AccountMove(models.Model):
     def _prepare_zimra_invoice_data(self, config):
         """Prepare invoice data for ZIMRA format with validation"""
         try:
+            if not config:
+                raise ValidationError(f"Invoice {self.name}: No ZIMRA configuration provided")
+
             # Get tax and currency mappings
+            if not config.tax_mapping_ids:
+                raise ValidationError(f"Invoice {self.name}: No tax mappings defined in ZIMRA config {config.name}")
+
+            if not config.currency_mapping_ids:
+                raise ValidationError(
+                    f"Invoice {self.name}: No currency mappings defined in ZIMRA config {config.name}")
+
             tax_mappings = {tm.odoo_tax_id.id: tm for tm in config.tax_mapping_ids}
             currency_mappings = {cm.odoo_currency_id.id: cm for cm in config.currency_mapping_ids}
 
@@ -392,8 +410,8 @@ class AccountMove(models.Model):
             line_items = self._get_line_items(tax_mappings)
 
             if not line_items:
-                _logger.error(f"Invoice {self.name}: No valid line items found")
-                return None
+                raise ValidationError(f"Invoice {self.name}: No valid line items found. "
+                                      f"Check invoice lines and tax mappings.")
 
             # Create timestamp
             timestamp = self._create_timestamp(self.invoice_date or fields.Date.today())
@@ -403,14 +421,13 @@ class AccountMove(models.Model):
             has_discount = any(line.discount > 0 for line in self.invoice_line_ids)
 
             if is_credit_note:
-                # Credit Note format
                 data = {
                     "CreditNoteId": self.name,
                     "CreditNoteNumber": self.name,
                     "OriginalInvoiceId": self.reversed_entry_id.name if self.reversed_entry_id else "",
                     "Reference": self.ref or '',
                     "IsTaxInclusive": True,
-                    "IsDiscounted":has_discount,
+                    "IsDiscounted": has_discount,
                     "BuyerContact": buyer_contact,
                     "Date": timestamp,
                     "LineItems": line_items,
@@ -421,9 +438,6 @@ class AccountMove(models.Model):
                     "IsRetry": bool(self.zimra_retry_count > 0),
                 }
             else:
-                # Regular Invoice format
-                has_discount = any(line.discount > 0 for line in self.invoice_line_ids)
-
                 data = {
                     "InvoiceId": self.name,
                     "InvoiceNumber": self.name,
@@ -444,8 +458,9 @@ class AccountMove(models.Model):
             return data
 
         except Exception as e:
-            _logger.exception(f"Error preparing ZIMRA data for invoice {self.name}")
-            return None
+            # Raise the error instead of returning None
+            _logger.exception("Error preparing  data for invoice %s", self.name)
+            raise ValidationError(f"Failed to prepare  data for invoice {self.name}: {e}")
 
     def _get_buyer_contact(self):
         """Get buyer contact information"""
@@ -510,6 +525,7 @@ class AccountMove(models.Model):
         tax_code = ""
         if line.tax_ids:
             for tax in line.tax_ids:
+                _logger.info(f"Preparing tax code {line.tax_ids.name}")
                 if tax.id in tax_mappings:
                     tax_code = tax_mappings[tax.id].zimra_tax_code
                     break
@@ -544,19 +560,30 @@ class AccountMove(models.Model):
         }
 
     def _parse_product_name(self, line):
-        """Parse product name to extract description and HS code"""
-        if line.product_id:
+        """Safely extract product name and HS code from line"""
+        if not line.product_id:
+            # Fallback for service or manual line
+            return line.name or "Service", ''
+
+        # Safely check if product has HS code field
+        hscode = getattr(line.product_id, 'l10n_hs_code', '') or ''
+        name = line.product_id.name or "Unnamed Product"
+
+        if not hscode:
             try:
-                match = re.search(r'\b\d{8,}\b', line.product_id.name)
+                # Look for an 8+ digit HS code in the product name
+                match = re.search(r'\b\d{8,}\b', name)
                 if match:
                     hscode = match.group()
-                    name = re.sub(r'\b' + re.escape(hscode) + r'\b', '', line.product_id.name).strip()
+                    # Remove the HS code from the name
+                    name = re.sub(r'\b' + re.escape(hscode) + r'\b', '', name).strip()
+                    # Clean up multiple spaces
                     name = re.sub(r'\s+', ' ', name)
-                    return name, hscode
-                return line.product_id.name, ''
-            except Exception:
-                return line.product_id.name, ''
-        return line.name or "Service", ''
+            except ValueError:
+                _logger.warning(f"Regex failed when parsing product name for line '{line.name}'")
+                pass
+
+        return name, hscode
 
     def _create_timestamp(self, date_field):
         """Create timestamp in ISO format"""
@@ -601,23 +628,11 @@ class AccountMove(models.Model):
     # ==================== Override Methods ====================
 
     def action_post(self):
-        """Override action_post to auto-fiscalize when invoice is posted"""
+        """Override action_post - auto-fiscalization disabled"""
         result = super(AccountMove, self).action_post()
 
-        # Auto-fiscalize customer invoices and credit notes
-        for move in self:
-            if move._should_fiscalize():
-                config = move._get_active_zimra_config()
-
-                # FIXED: Check if auto_fiscalize is True (was False before)
-                if config and config.auto_fiscalize and move.zimra_status == 'pending':
-                    try:
-                        fiscalize_result = move._send_to_zimra()
-                        if not fiscalize_result:
-                            _logger.warning(
-                                f"Auto-fiscalization failed for invoice {move.name}. Status: {move.zimra_status}, Error: {move.zimra_error}")
-                    except Exception as e:
-                        _logger.exception(f"Exception during auto-fiscalization of {move.name}")
+        # Auto-fiscalization disabled - use manual fiscalization only
+        # Users must click "Fiscalize Invoice" button to send to ZIMRA
 
         return result
 
@@ -666,37 +681,14 @@ class AccountMove(models.Model):
         if move.is_invoice() and move.move_type in ['out_invoice', 'out_refund']:
             move.zimra_status = 'pending'
 
-            # Auto-fiscalize if already posted
-            if move.state == 'posted':
-                config = move._get_active_zimra_config()
 
-                if config and config.auto_fiscalize:
-                    try:
-                        move._send_to_zimra()
-                    except Exception as e:
-                        _logger.exception(f"Error during auto-fiscalization on create for {move.name}")
         else:
             move.zimra_status = 'exempted'
 
         return move
 
     def write(self, vals):
-        """Override write to handle state changes"""
-        result = super(AccountMove, self).write(vals)
-
-        # Handle state change to 'posted'
-        if 'state' in vals and vals['state'] == 'posted':
-            for move in self:
-                if move._should_fiscalize() and move.zimra_status == 'pending':
-                    config = move._get_active_zimra_config()
-
-                    if config and config.auto_fiscalize:
-                        try:
-                            move._send_to_zimra()
-                        except Exception as e:
-                            _logger.exception(f"Error during auto-fiscalization on post for {move.name}")
-
-        return result
+        return super().write(vals)
 
     # ==================== Action Methods ====================
 

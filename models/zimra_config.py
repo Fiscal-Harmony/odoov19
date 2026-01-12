@@ -1,4 +1,3 @@
-# zimra_fiscal/models/zimra_config.py
 # -*- coding: utf-8 -*-
 from email.policy import default
 
@@ -28,6 +27,12 @@ class ZimraConfig(models.Model):
     api_secret = fields.Char('API Secret', required=True)
     company_id = fields.Many2one('res.company', 'Company', required=True,
                                  default=lambda self: self.env.company)
+    warehouse_id = fields.Many2one(
+        'stock.warehouse',
+        string='Warehouse',
+        required=True,
+        help='Warehouse / outlet this fiscal device belongs to'
+    )
     active = fields.Boolean('Active', default=True)
     userId = fields.Integer('Fiscal Harmony User ID', default=0)
 
@@ -37,9 +42,6 @@ class ZimraConfig(models.Model):
                                     help='Automatically fiscalize POS orders when paid')
     retry_count = fields.Integer('Retry Count', default=8,
                                  help='Number of times to retry failed requests')
-    # In your zimra_config model
-   # auto_fiscalize_invoices = fields.Boolean('Auto-fiscalize Invoices on Post', default=False)
-    #auto_fiscalize_on_payment = fields.Boolean('Auto-fiscalize on Payment', default=False)
 
     # Tax and Currency Mappings
     tax_mapping_ids = fields.One2many('zimra.tax.mapping', 'config_id', 'Tax Mappings')
@@ -55,20 +57,108 @@ class ZimraConfig(models.Model):
     device_taxes_synced = fields.Boolean('Device Taxes Synced')
     last_tax_sync = fields.Datetime('Last Tax Sync')
 
-    @api.depends('company_id')
-    def _compute_statistics(self):
-        for record in self:
-            domain = [('company_id', '=', record.company_id.id)]
+    # FIXED: Removed the company_unique constraint to allow multiple configurations per company
+    # Only one active configuration per company is enforced via Python constraint
+    _sql_constraints = []
 
-            record.total_sent = self.env['pos.order'].search_count(
+    @api.model
+    def get_active_config(self, company_id=None):
+        """Get the active configuration for the current or specified company."""
+        if not company_id:
+            company_id = self.env.company.id
+
+        config = self.search([
+            ('company_id', '=', company_id),
+            ('active', '=', True)
+        ], limit=1)
+
+        if not config:
+            _logger.warning(f"No active ZIMRA configuration found for company {company_id}")
+
+        return config
+
+    @api.constrains('warehouse_id', 'active')
+    def _check_single_active_per_warehouse(self):
+        for record in self:
+            if record.active:
+                other = self.search([
+                    ('warehouse_id', '=', record.warehouse_id.id),
+                    ('active', '=', True),
+                    ('id', '!=', record.id)
+                ], limit=1)
+                if other:
+                    raise ValidationError(
+                        f"An active ZIMRA configuration already exists for "
+                        f"warehouse {record.warehouse_id.name}."
+                    )
+    @api.model
+    def get_config_for_order(self, order):
+        """Get configuration for a specific order based on its company."""
+        if not order or not order.company_id:
+            return False
+
+        return self.get_active_config(order.company_id.id)
+
+    @api.model
+    def get_active_config(self, warehouse_id=None):
+        """Fetch active config for a given warehouse."""
+        domain = [('active', '=', True)]
+        if warehouse_id:
+            domain.append(('warehouse_id', '=', warehouse_id))
+        config = self.search(domain, limit=1)
+        if not config:
+            _logger.warning(f"No active ZIMRA configuration found for warehouse {warehouse_id}")
+        return config
+
+    @api.model
+    def get_config_for_order(self, order):
+        warehouse = (
+            order.session_id.config_id.warehouse_id
+            if order and order._name == 'pos.order'
+            else getattr(order, 'warehouse_id', False)
+        )
+        return self.get_active_config(warehouse.id) if warehouse else False
+
+    @api.depends('company_id', 'warehouse_id')
+    def _compute_statistics(self):
+        PosOrder = self.env['pos.order']
+
+        for record in self:
+            domain = [
+                ('company_id', '=', record.company_id.id),
+            ]
+
+            # POS orders do NOT have warehouse_id directly
+            # Warehouse comes from: pos.order → config → picking_type → warehouse
+            if record.warehouse_id:
+                domain.append(
+                    ('config_id.picking_type_id.warehouse_id', '=', record.warehouse_id.id)
+                )
+
+            record.total_sent = PosOrder.search_count(
                 domain + [('zimra_status', 'in', ['sent', 'fiscalized'])]
             )
-            record.total_fiscalized = self.env['pos.order'].search_count(
+            record.total_fiscalized = PosOrder.search_count(
                 domain + [('zimra_status', '=', 'fiscalized')]
             )
-            record.total_failed = self.env['pos.order'].search_count(
+            record.total_failed = PosOrder.search_count(
                 domain + [('zimra_status', '=', 'failed')]
             )
+
+    @api.constrains('warehouse_id', 'active')
+    def _check_unique_active_per_warehouse(self):
+        for record in self:
+            if record.active and record.warehouse_id:
+                other_active = self.search([
+                    ('warehouse_id', '=', record.warehouse_id.id),
+                    ('active', '=', True),
+                    ('id', '!=', record.id)
+                ])
+                if other_active:
+                    raise ValidationError(
+                        f"An active configuration already exists for warehouse '{record.warehouse_id.name}'. "
+                        "Please deactivate it first or set this configuration as inactive."
+                    )
 
     @api.constrains('api_key')
     def _check_api_key(self):
@@ -83,39 +173,17 @@ class ZimraConfig(models.Model):
                 raise ValidationError('API URL must start with http:// or https://')
 
     def __encode_data(self, data: dict) -> str:
-        """Encodes the given data as a valid JSON string for transmitting.
-
-        Args:
-            data (dict): The data to be processed.
-
-        Returns:
-            str: The JSON representation of the given data.
-        """
+        """Encodes the given data as a valid JSON string for transmitting."""
         return json.dumps(data, separators=(",", ":"), sort_keys=True)
 
     def __get_request_url(self, route: str) -> str:
-        """Constructs and returns the route for the API request.
-
-        Args:
-            route (str): The path for the request.
-
-        Returns:
-            str: The constructed URL.
-        """
+        """Constructs and returns the route for the API request."""
         if route.startswith("/"):
             return self.api_url.rstrip('/') + route
         return f"{self.api_url.rstrip('/')}/{route}"
 
     def __get_headers(self, api_key: str | None = None) -> dict[str, str]:
-        """Generate the headers based on the either the stored or provided API details.
-
-        Args:
-            api_key (str | None, optional): The API Key to use instead of the stored value.\
-                Defaults to None.
-
-        Returns:
-            dict[str,str]: The headers in dictionary format."""
-
+        """Generate the headers based on the either the stored or provided API details."""
         api_key: str = self.api_key if api_key is None else api_key
         headers = {
             "X-Api-Key": api_key,
@@ -123,44 +191,21 @@ class ZimraConfig(models.Model):
             "X-App-Station": "",
             "Content-Type": "application/json"
         }
-
         return headers
 
     def __get_signed_headers(self, payload: str) -> dict:
-        """Generate the headers with a signature based on the payload.
-
-        Args:
-            payload (str): The JSON encoded body of the request.
-
-        Returns:
-            dict: The headers in a dictionary format, including the signature.
-        """
+        """Generate the headers with a signature based on the payload."""
         headers = self.__get_headers()
         signature = self.__sign_payload(payload)
-
-
         headers["X-Api-Signature"] = signature
-
-
         return headers
 
     def __get_authheaders(self, api_key: str | None = None) -> dict[str, str]:
-        """Generate the headers based on the either the stored or provided API details.
-
-        Args:
-            api_key (str | None, optional): The API Key to use instead of the stored value.\
-                Defaults to None.
-
-        Returns:
-            dict[str,str]: The headers in dictionary format."""
-
+        """Generate the headers based on the either the stored or provided API details."""
         api_key: str = self.api_key if api_key is None else api_key
         headers = {
             "X-Api-Key": api_key,
-            # "X-Application": "FH_Quickbooks",
-            # "X-App-Station": "ERPNext",
         }
-
         return headers
 
     def __update_last_successful_request(self):
@@ -174,11 +219,7 @@ class ZimraConfig(models.Model):
         self.device_taxes_synced = 1
 
     def __log_request(self, log_data: dict):
-        """Log request data for debugging and monitoring.
-
-        Args:
-            log_data (dict): The log data to record.
-        """
+        """Log request data for debugging and monitoring."""
         log_message = f"ZIMRA API Request - Status: {log_data.get('status', 'Unknown')}"
         if log_data.get('error_details'):
             log_message += f" - Error: {log_data['error_details']}"
@@ -189,14 +230,7 @@ class ZimraConfig(models.Model):
             _logger.debug(f"Response: {log_data['response']}")
 
     def __make_request(self, route: str) -> requests.Response:
-        """Generates and processes a standard GET request to the Fiscal Harmony API.
-
-        Args:
-            route (str): The route to request against.
-
-        Returns:
-            requests.Response: The response from the Fiscal Harmony platform.
-        """
+        """Generates and processes a standard GET request to the Fiscal Harmony API."""
         request_url = self.__get_request_url(route)
         headers = self.__get_authheaders()
         _logger.info(f"Request Headers: {headers}")
@@ -268,67 +302,37 @@ class ZimraConfig(models.Model):
         return response
 
     def __sign_payload(self, payload: str) -> str:
-        """Generate the signature for the given `payload`.
-
-        Args:
-            payload (str): The payload to be signed.
-
-        Returns:
-            str: The generated signature."""
-
+        """Generate the signature for the given payload."""
         hasher = hmac.new(
             self.api_secret.encode("utf-8"),
             msg=payload.encode("utf-8"),
             digestmod=hashlib.sha256,
         )
         signature = base64.b64encode(hasher.digest()).decode("utf-8")
-
         return signature
 
-    def __make_signed_request(self, route: str, data: dict | str| list, method: str = 'POST') -> requests.Response:
-        """Generates and processes a signed request to the Fiscal Harmony API.
-
-        This implementation matches the JavaScript signature generation:
-        - Only POST, PUT, PATCH methods use the body for signing
-        - The raw body string is used directly for HMAC-SHA256 signature
-        - Empty body for GET requests
-
-        Args:
-            route (str): The route to request against.
-            data (dict): The data to be sent in the request body.
-            method (str): HTTP method (POST, PUT, etc.). Defaults to 'POST'.
-
-        Returns:
-            requests.Response: The response from the Fiscal Harmony platform.
-        """
+    def __make_signed_request(self, route: str, data: dict | str | list, method: str = 'POST') -> requests.Response:
+        """Generates and processes a signed request to the Fiscal Harmony API."""
         request_url = self.__get_request_url(route)
 
-        # Initialize body based on method (matching JavaScript logic)
         body = ""
         if method.upper() in ["POST", "PUT", "PATCH"]:
-            # Handle both dict and string inputs
             if isinstance(data, dict):
-                # Convert dict to compact JSON for signing
-                _logger.info("Converting dict to Json %s",data)
+                _logger.info("Converting dict to Json %s", data)
                 body = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
-            elif isinstance(data,list):
-                 # Convert list to compact JSON for signing
-                 _logger.info("Converting list to Json %s", data)
-                 body = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
-                 _logger.info(body)
-
+            elif isinstance(data, list):
+                _logger.info("Converting list to Json %s", data)
+                body = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
+                _logger.info(body)
             else:
-                # Parse formatted JSON string and re-serialize as compact JSON
                 try:
                     parsed_data = json.loads(data)
                     body = json.dumps(parsed_data, separators=(',', ':'), ensure_ascii=False)
-                    _logger.info("successfully loaded json %s",body)
+                    _logger.info("successfully loaded json %s", body)
                 except json.JSONDecodeError:
-                    # If it's not valid JSON, use as-is
-                    _logger.info("no need to  format to json using as is %s",data)
+                    _logger.info("no need to  format to json using as is %s", data)
                     body = data
 
-        # Generate headers with signature based on the body
         headers = self.__get_signed_headers(body)
         _logger.info(f"Request URL: {request_url}")
         _logger.info(f"Request Headers: {headers}")
@@ -340,7 +344,7 @@ class ZimraConfig(models.Model):
             "timestamp": datetime.now().isoformat()
         }
 
-        _logger.info("sending this object for fiscalisation %s",log_data)
+        _logger.info("sending this object for fiscalisation %s", log_data)
 
         try:
             if method.upper() == 'POST':
@@ -371,7 +375,7 @@ class ZimraConfig(models.Model):
 
             try:
                 response_json = response.text
-                _logger.info("response plain %s",response.text)
+                _logger.info("response plain %s", response.text)
                 log_data["response"] = json.dumps(response_json, indent=2)
             except json.JSONDecodeError:
                 log_data["response"] = response.text
@@ -415,6 +419,7 @@ class ZimraConfig(models.Model):
 
         self.__log_request(log_data)
         return response
+
     def save_taxmapping(self, mapping):
         self.ensure_one()
         if not mapping.odoo_tax_id or not mapping.zimra_tax_code:
@@ -422,10 +427,9 @@ class ZimraConfig(models.Model):
 
         payload = {
             "UserId": self.userId,
-            "TaxCode": mapping.odoo_tax_id.name,
+            "TaxCode": mapping.zimra_tax_code,
             "TaxName": f"{mapping.odoo_tax_id.name} ({mapping.odoo_tax_id.amount}%)",
             "DestinationTaxId": int(mapping.zimra_tax_code),
-
         }
         _logger.info(payload)
 
@@ -437,21 +441,11 @@ class ZimraConfig(models.Model):
         response = requests.post(url, headers=headers, data=data, timeout=self.timeout)
 
         if response.status_code in [200, 201]:
-            # mapping.synced_to_zimra = True
             _logger.info(response)
             return response.json()
         else:
             raise ValidationError(f"ZIMRA returned error: {response}")
 
-        # if mapping.synced_to_zimra and mapping.zimra_tax_code:
-        # Update (PUT)
-        # url = self.__get_request_url(f"{route}/{mapping.zimra_tax_code}")
-        # response = requests.put(url, headers=headers, data=data, timeout=self.timeout)
-
-    # else:
-    # Create (POST)
-    # url = self.__get_request_url(route)
-    # response = requests.post(url, headers=headers, data=data, timeout=self.timeout)
     def save_currencymapping(self, mapping):
         self.ensure_one()
         if not mapping.odoo_currency_id or not mapping.zimra_currency_code:
@@ -472,7 +466,6 @@ class ZimraConfig(models.Model):
         response = requests.post(url, headers=headers, data=data, timeout=self.timeout)
 
         if response.status_code in [200, 201]:
-            # mapping.synced_to_zimra = True
             _logger.info(response)
             return response.json()
         else:
@@ -487,13 +480,13 @@ class ZimraConfig(models.Model):
             if response.status_code == 200:
                 data = response.json()
                 user_id = data.get("Id", "Unknown")
-                company = data.get("FullName","Unknown")
+                company = data.get("FullName", "Unknown")
                 return {
                     'type': 'ir.actions.client',
                     'tag': 'display_notification',
                     'params': {
                         'title': 'Connection Successful',
-                        'message': f'Successfully connected to Fiscal Harmony API. UserId  {user_id}',
+                        'message': f'Successfully connected to Fiscal Harmony API for {self.company_id.name}. UserId: {user_id}',
                         'type': 'success',
                         'sticky': False,
                     }
@@ -515,10 +508,8 @@ class ZimraConfig(models.Model):
 
     def send_fiscal_data(self, data, route: str = "/invoice") -> dict:
         """Send fiscal data to ZIMRA API with signature."""
-
         self.ensure_one()
 
-        # Normalize only for checking Reference
         if isinstance(data, str):
             try:
                 preview = json.loads(data)
@@ -537,9 +528,7 @@ class ZimraConfig(models.Model):
             return {"status": "skipped", "reason": "Shop reference"}
 
         try:
-            # Send data as-is (no serialization)
             response = self.__make_signed_request(route, data)
-
             _logger.info(" Transaction response string: %s", response.text.strip())
             parsed = response.text.strip()
             fiscalstatus = [parsed]
@@ -554,38 +543,19 @@ class ZimraConfig(models.Model):
             raise
 
     def check_fiscalisation_status(self, data: list, route: str = "/status") -> dict:
-        """Send fiscal data to ZIMRA API with signature.
-
-        Args:
-            data (dict): Invoice guuid to check status for .
-            route (str): The API route to send to. Defaults to "/status".
-
-        Returns:
-            dict: The response from the API.
-        """
+        """Send fiscal data to ZIMRA API with signature."""
         self.ensure_one()
 
         try:
             response = self.__make_signed_request(route, data)
-
             _logger.info(" Transaction response: %s", response.json())
-
             return response.json()
         except Exception as e:
             _logger.error(f"Failed to check status: {str(e)}")
             raise
 
     def retry_failed_request(self, route: str, data: dict = None, method: str = 'GET') -> dict:
-        """Retry a failed request with exponential backoff.
-
-        Args:
-            route (str): The API route.
-            data (dict, optional): Request data for signed requests.
-            method (str): HTTP method. Defaults to 'GET'.
-
-        Returns:
-            dict: The response from the API.
-        """
+        """Retry a failed request with exponential backoff."""
         import time
 
         for attempt in range(self.retry_count):
@@ -596,9 +566,8 @@ class ZimraConfig(models.Model):
                     response = self.__make_request(route)
                 return response.json()
             except Exception as e:
-                if attempt == self.retry_count - 1:  # Last attempt
+                if attempt == self.retry_count - 1:
                     raise
-                # Exponential backoff
                 time.sleep(2 ** attempt)
 
         raise ValidationError("Max retry attempts reached")
@@ -631,11 +600,7 @@ class ZimraConfig(models.Model):
         }
 
     def get_device_taxes(self):
-        """Fetch taxes from the device endpoint and return them.
-
-        Returns:
-            dict: Device information including taxes, or None if failed
-        """
+        """Fetch taxes from the device endpoint and return them."""
         self.ensure_one()
         try:
             response = self.__make_request("/fiscaldevice")
@@ -646,11 +611,9 @@ class ZimraConfig(models.Model):
 
                 _logger.info(device_data)
 
-                # Get and parse the CurrentConfig JSON string
                 current_config_str = device_data.get("CurrentConfig", "{}")
                 current_config = json.loads(current_config_str)
 
-                # Extract taxID and taxName only
                 applicable_taxes = current_config.get("applicableTaxes", [])
                 _logger.info(applicable_taxes)
                 simplified_taxes = [
@@ -677,22 +640,14 @@ class ZimraConfig(models.Model):
 
         if response.status_code == 200:
             pdf_data = base64.b64encode(response.content).decode()
-            return  pdf_data
+            return pdf_data
         else:
             return response.status_code
 
     def sync_device_taxes(self):
-        """Sync taxes from device endpoint to local tax mappings.
-
-        This method fetches taxes from the device and updates/creates
-        local tax mappings accordingly.
-
-        Returns:
-            dict: Action result for notification
-        """
+        """Sync taxes from device endpoint to local tax mappings."""
         self.ensure_one()
         try:
-            # Get simplified taxes (only taxID and taxName)
             taxes = self.get_device_taxes()
 
             if not taxes:
@@ -700,20 +655,16 @@ class ZimraConfig(models.Model):
 
             _logger.info("Taxes Pulled are %s", taxes)
 
-            # Get the tax mapping model
             TaxMapping = self.env['zimra.tax.mapping']
 
-            # Clear existing tax mappings for this config
             existing_mappings = TaxMapping.search([('config_id', '=', self.id)])
             if existing_mappings:
                 existing_mappings.unlink()
                 _logger.info(f"Deleted {len(existing_mappings)} existing tax mappings")
 
-            # Create new tax mappings from device response
             created_count = 0
 
             for tax_data in taxes:
-                # Since get_device_taxes returns simplified structure with only taxID and taxName
                 tax_id = tax_data.get('taxID')
                 tax_name = tax_data.get('taxName', '')
 
@@ -721,13 +672,9 @@ class ZimraConfig(models.Model):
                     _logger.warning(f"Skipping invalid tax data: {tax_data}")
                     continue
 
-                # Use the existing normalize_tax_type method from the model
                 normalized_tax_type = TaxMapping.normalize_tax_type(tax_name)
-
-                # Extract tax rate from the name if possible
                 tax_rate = self._extract_tax_rate_from_name(tax_name)
 
-                # Create the tax mapping record
                 try:
                     tax_mapping_vals = {
                         'config_id': self.id,
@@ -752,7 +699,6 @@ class ZimraConfig(models.Model):
             if created_count == 0:
                 raise ValidationError("No tax mappings were created")
 
-            # Mark as synced
             self.device_taxes_synced = True
             self.last_tax_sync = fields.Datetime.now()
 
@@ -761,7 +707,7 @@ class ZimraConfig(models.Model):
                 'tag': 'display_notification',
                 'params': {
                     'title': 'Taxes Synced',
-                    'message': f'Successfully synced {created_count} taxes from device',
+                    'message': f'Successfully synced {created_count} taxes from device for {self.company_id.name}',
                     'type': 'success',
                     'sticky': False,
                 }
@@ -795,18 +741,10 @@ class ZimraConfig(models.Model):
             }
 
     def _extract_tax_rate_from_name(self, tax_name):
-        """Extract tax rate from tax name.
-
-        Args:
-            tax_name (str): The tax name containing rate info
-
-        Returns:
-            float: The extracted tax rate or 0.0
-        """
+        """Extract tax rate from tax name."""
         import re
 
         try:
-            # Try to extract rate from tax name (e.g., "15.5%" from "Standard rated 15.5%")
             rate_match = re.search(r'(\d+\.?\d*)\s*%', tax_name)
             if rate_match:
                 return float(rate_match.group(1))
@@ -814,20 +752,15 @@ class ZimraConfig(models.Model):
             _logger.warning(f"Could not extract rate from tax name '{tax_name}': {e}")
 
         return 0.0
-    def get_available_taxes(self):
-        """Get available taxes for this device configuration.
 
-        Returns:
-            list: List of available taxes from device or local cache
-        """
+    def get_available_taxes(self):
+        """Get available taxes for this device configuration."""
         self.ensure_one()
 
-        # First try to get from device
         device_data = self.get_device_taxes()
-        if device_data:  # Already a list
+        if device_data:
             return device_data
 
-        # Fallback to local tax mappings
         local_taxes = []
         for mapping in self.tax_mapping_ids:
             local_taxes.append({
@@ -840,14 +773,7 @@ class ZimraConfig(models.Model):
         return local_taxes
 
     def validate_tax_code(self, tax_code):
-        """Validate if a tax code is available for this device.
-
-        Args:
-            tax_code (str): The tax code to validate
-
-        Returns:
-            bool: True if tax code is valid, False otherwise
-        """
+        """Validate if a tax code is available for this device."""
         self.ensure_one()
         available_taxes = self.get_available_taxes()
 
@@ -858,14 +784,7 @@ class ZimraConfig(models.Model):
         return False
 
     def get_tax_rate_by_code(self, tax_code):
-        """Get tax rate by tax code.
-
-        Args:
-            tax_code (str): The tax code
-
-        Returns:
-            float: Tax rate, or 0.0 if not found
-        """
+        """Get tax rate by tax code."""
         self.ensure_one()
         available_taxes = self.get_available_taxes()
 
@@ -874,7 +793,6 @@ class ZimraConfig(models.Model):
                 return tax.get('rate', 0.0)
 
         return 0.0
-
 
     def cron_sync_device_taxes(self):
         """Cron job to periodically sync device taxes for all active configurations."""
@@ -887,20 +805,10 @@ class ZimraConfig(models.Model):
             except Exception as e:
                 _logger.error(f"Failed to sync taxes for config {config.name}: {str(e)}")
 
-    # Add this method to enhance your fiscal data sending
     def send_fiscal_data_with_validation(self, data: dict, route: str = "/fiscalize") -> dict:
-        """Send fiscal data with tax validation against device taxes.
-
-        Args:
-            data (dict): The fiscal data to send
-            route (str): The API route to send to
-
-        Returns:
-            dict: The response from the API
-        """
+        """Send fiscal data with tax validation against device taxes."""
         self.ensure_one()
 
-        # Validate tax codes if present in data
         if 'items' in data:
             for item in data['items']:
                 if 'tax_code' in item:
@@ -910,5 +818,4 @@ class ZimraConfig(models.Model):
                             f"Please sync device taxes first."
                         )
 
-        # Send the data
         return self.send_fiscal_data(data, route)
