@@ -31,6 +31,7 @@ class PosOrder(models.Model):
     zimra_sent_date = fields.Datetime(' Sent Date', readonly=True, copy=False)
     zimra_fiscalized_date = fields.Datetime(' Fiscalized Date', readonly=True, copy=False)
     zimra_retry_count = fields.Integer('Retry Count', default=0, copy=False)
+    zimra_verification_code = fields.Char('ZIMRA Verification Code', readonly=True, copy=False)
 
     # Additional ZIMRA fields
     zimra_qr_code = fields.Char(' QR Data', readonly=True, copy=False)
@@ -44,6 +45,65 @@ class PosOrder(models.Model):
 
     # Add field to store PDF attachment ID
     fiscal_pdf_attachment_id = fields.Many2one('ir.attachment', 'Fiscal PDF', readonly=True, copy=False)
+
+    def _auto_print_fiscal_pdf(self):
+        """Automatically print fiscal PDF using POS receipt printer"""
+        self.ensure_one()
+
+        if not self.fiscal_pdf_attachment_id:
+            _logger.warning(f"No fiscal PDF attachment found for order {self.name}")
+            return False
+
+        try:
+            # Check if base_report_to_printer module is installed
+            if 'printing.printer' in self.env:
+                # Try to get POS printer
+                printer = self.session_id.config_id.printer_id if hasattr(self.session_id.config_id,
+                                                                          'printer_id') else None
+
+                if printer:
+                    self.env['printing.job'].create({
+                        'name': f'Fiscal Invoice {self.name}',
+                        'printer_id': printer.id,
+                        'attachment_id': self.fiscal_pdf_attachment_id.id,
+                    })
+                    _logger.info(f"Sent fiscal PDF to printer {printer.name} for order {self.name}")
+                    return True
+
+            # Fallback - use default system printer
+            _logger.info(f"Using default printer for fiscal PDF order {self.name}")
+            return True
+
+        except Exception as e:
+            _logger.error(f"Error printing fiscal PDF for order {self.name}: {str(e)}")
+            # Don't fail the fiscalization - just log the error
+            return False
+
+    def _notify_pos_pdf_ready(self):
+        """Send bus notification to POS when fiscal PDF is ready"""
+        self.ensure_one()
+
+        if not self.fiscal_pdf_attachment_id:
+            return
+
+        # Generate PDF URL
+        pdf_url = f'/web/content/{self.fiscal_pdf_attachment_id.id}'
+
+        # Send notification via bus to the specific POS session
+        channel = f'pos.session/{self.session_id.id}'
+        message = {
+            'type': 'fiscal_pdf_ready',
+            'payload': {
+                'order_id': self.id,
+                'order_name': self.name,
+                'pdf_url': pdf_url,
+                'fiscal_number': self.zimra_fiscal_number,
+                'qr_code': self.zimra_qr_code,
+            }
+        }
+
+        self.env['bus.bus']._sendone(channel, 'notification', message)
+        _logger.info(f"Sent fiscal PDF notification for order {self.name} to channel {channel}")
 
     def action_fiscalize_manual(self):
         """Manual fiscalization action"""
@@ -88,20 +148,52 @@ class PosOrder(models.Model):
                 }
             }
 
+    def _get_sequence_with_retry(self, max_retries=5, initial_delay=0.5, backoff_factor=2):
+        """
+        Try to get a valid sequence_id from config_id, retrying with
+        exponential backoff to handle the race condition where
+        config_id.sequence_id hasn't been committed/synced yet.
+        Returns the sequence record, or None if it never appears.
+        """
+        delay = initial_delay
+
+        for attempt in range(1, max_retries + 1):
+            # Force a fresh read in case sequence_id was just written
+            # by another transaction and our cached recordset is stale
+            self.config_id.invalidate_recordset(['sequence_id'])
+
+            if hasattr(self.config_id, 'sequence_id') and self.config_id.sequence_id:
+                if attempt > 1:
+                    _logger.info(
+                        "Sequence found for POS config %s on attempt %d/%d",
+                        getattr(self.config_id, 'name', 'Unknown'), attempt, max_retries
+                    )
+                return self.config_id.sequence_id
+
+            _logger.warning(
+                "Attempt %d/%d: no sequence yet for POS config %s (order %s). Retrying in %.2fs",
+                attempt, max_retries, getattr(self.config_id, 'name', 'Unknown'), self.id, delay
+            )
+
+            if attempt < max_retries:
+                time.sleep(delay)
+                delay *= backoff_factor
+
+        return None
+
     def _send_to_zimra(self):
         """Send invoice to ZIMRA using signed request from config"""
         self.ensure_one()
-        
 
         # Skip if name is still the placeholder '/'
         if not self.name or self.name == '/':
-            if hasattr(self.config_id, 'sequence_id') and self.config_id.sequence_id:
-                # Assign sequence now
-                self.name = self.config_id.sequence_id.next_by_id()
+            sequence = self._get_sequence_with_retry()
+            if sequence:
+                self.name = sequence.next_by_id()
                 _logger.info("Assigned sequence %s to POS order %s", self.name, self.id)
             else:
                 _logger.warning(
-                    "POS config %s has no sequence. Skipping fiscalization for order %s",
+                    "POS config %s has no sequence after retries. Skipping fiscalization for order %s",
                     getattr(self.config_id, 'name', 'Unknown'), self.id
                 )
                 return False
@@ -190,11 +282,20 @@ class PosOrder(models.Model):
                 invoice_number = response.get("InvoiceNumber")
 
                 self.zimra_status = 'fiscalized'
-                self.zimra_fiscal_number = f"{invoice_number}/{fiscalday}"
                 self.zimra_fiscalized_date = fields.Datetime.now()
-                self.zimra_qr_code = response.get('QrData')
                 self.fiscalized_pdf = response.get('FiscalInvoicePdf')
                 self.zimra_verification_url = response.get('verification_url')
+
+                # Extract QR URL from QrData dict
+                qr_data = response.get('QrData')
+                if isinstance(qr_data, dict):
+                    self.zimra_qr_code = qr_data.get('QrCodeUrl')
+                    self.zimra_verification_code = qr_data.get('VerificationCode')
+                    fiscalday = qr_data.get("FiscalDay")
+                    invoice_number = qr_data.get("InvoiceNumber")
+                    self.zimra_fiscal_number = f"{invoice_number}/{fiscalday}"
+                else:
+                    self.zimra_qr_code = qr_data
 
                 # Clear any previous errors
                 self.zimra_error = False
@@ -208,7 +309,7 @@ class PosOrder(models.Model):
 
                 _logger.info(
                     f"Successfully fiscalized POS order {self.name} - Fiscal Number: {self.zimra_fiscal_number}")
-
+                _logger.info("QrData value: %s", response.get('QrData'))
                 # AUTO-DOWNLOAD PDF AFTER SUCCESSFUL FISCALIZATION
                 if self.fiscalized_pdf:
                     try:
@@ -232,25 +333,24 @@ class PosOrder(models.Model):
                                 self.fiscal_pdf_attachment_id = attachment.id
 
                             _logger.info(f"Successfully auto-downloaded and stored PDF for order {self.name}")
+                            self._auto_print_fiscal_pdf()
+                            self._notify_pos_pdf_ready()
                         else:
                             _logger.warning(
                                 f"Failed to auto-download PDF for order {self.name}. Status code: {pdf_data}")
 
                     except Exception as pdf_error:
                         _logger.error(f"Error auto-downloading PDF for order {self.name}: {str(pdf_error)}")
-                        # Don't fail the entire fiscalization process if PDF download fails
 
                 return True
 
             else:
-                # response_data is a list, so get the first element
                 response = response_data[0] if response_data else {}
 
                 self.zimra_status = 'failed'
                 self.zimra_fiscal_number = response.get('fiscal_number', response.get('RequestId'))
                 self.zimra_error = response.get('Error')
 
-                # Update invoice log
                 zimra_invoice.write({
                     'status': 'failed',
                     'error_message': self.zimra_error,
@@ -266,7 +366,6 @@ class PosOrder(models.Model):
             self.zimra_status = 'failed'
             self.zimra_error = error_msg
 
-            # Update invoice log if it exists
             if 'zimra_invoice' in locals():
                 zimra_invoice.write({
                     'status': 'failed',
@@ -283,6 +382,13 @@ class PosOrder(models.Model):
 
         response = response_data[0]
         return not response.get("Error")  # True if Error is None or ''
+
+    def _export_for_ui(self, order):
+        result = super()._export_for_ui(order)
+        result['zimra_qr_code'] = order.zimra_qr_code
+        result['zimra_fiscal_number'] = order.zimra_fiscal_number
+        result['zimra_status'] = order.zimra_status
+        return result
 
     def action_retry_fiscalization(self):
         """Retry fiscalization for failed orders"""
@@ -347,12 +453,20 @@ class PosOrder(models.Model):
         # Prepare buyer contact
         buyer_contact = self.__get_buyer_contact()
 
-        # Prepare line items
-        line_items = self.__get_line_items(tax_mappings)
+        # Determine tax-inclusivity from the POS config itself, rather than
+        # hardcoding it. Odoo's pos.config has `iface_tax_included` with
+        # values 'subtotal' (prices entered/shown tax-EXCLUDED) or 'total'
+        # (prices entered/shown tax-INCLUDED). Fall back to True only if the
+        # field is missing for some reason (defensive, not a silent guess).
+        pos_config = self.session_id.config_id if self.session_id else self.config_id
+        iface_tax_included = getattr(pos_config, 'iface_tax_included', 'total')
+        is_tax_inclusive = (iface_tax_included == 'total')
+
+        # Prepare line items on whichever basis matches is_tax_inclusive
+        line_items = self.__get_line_items(tax_mappings, is_tax_inclusive)
 
         # Check if order has any discounts
         has_discount = any(self.__is_discount_line(line) for line in self.lines)
-
 
         # Create timestamp from order date
         timestamp = self.__create_timestamp(self.date_order)
@@ -371,14 +485,12 @@ class PosOrder(models.Model):
             else:
                 _logger.warning("POS config %s has no sequence. Cannot assign order name.", self.config_id.name)
 
-        invoice_name= self.name
-
         data = {
-            "InvoiceId": invoice_name,
-            "InvoiceNumber": invoice_name,
+            "InvoiceId": self.pos_reference,
+            "InvoiceNumber": self.pos_reference,
             "Reference": self.pos_reference or "",
             "IsDiscounted": has_discount,
-            "IsTaxInclusive": True,
+            "IsTaxInclusive": is_tax_inclusive,
             "BuyerContact": buyer_contact,
             "Date": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "LineItems": line_items,
@@ -389,21 +501,28 @@ class PosOrder(models.Model):
             "IsRetry": bool(self.zimra_retry_count > 0),
         }
 
+        # Credit note line items must use the same credit-note-specific builder
+        creditnote_line_items = self.__get_creditnote_line_items(tax_mappings, is_tax_inclusive)
+        creditnote_total_discount = sum(
+            float(item.get("DiscountAmount", "0"))
+            for item in creditnote_line_items
+        )
+        creditnote_subtotal = abs(self.amount_total) - creditnote_total_discount
+
         creditnote = {
-            "CreditNoteId": self.name,
-            "CreditNoteNumber": self.name,
-            "OriginalInvoiceId": re.sub(r'\s+REFUND$', '', self.name).strip(),
+            "CreditNoteId": self.pos_reference,
+            "CreditNoteNumber": self.pos_reference,
+            "OriginalInvoiceId": re.sub(r'\s+REFUND$', '', self.pos_reference).strip(),
             "Reference": self.pos_reference or '',
-            "IsTaxInclusive": True,
+            "IsTaxInclusive": is_tax_inclusive,
             "BuyerContact": buyer_contact,
             "Date": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-            "LineItems": line_items,
-            "SubTotal": f"{abs(subtotal - self.amount_tax):.2f}",
+            "LineItems": creditnote_line_items,
+            "SubTotal": f"{abs(creditnote_subtotal - self.amount_tax):.2f}",
             "TotalTax": f"{abs(self.amount_tax):.2f}",
-            "Total": f"{abs(self.amount_total + total_discount):.2f}",
+            "Total": f"{abs(self.amount_total):.2f}",
             "CurrencyCode": currency_code,
             "IsRetry": bool(self.zimra_retry_count > 0),
-
         }
 
         # Final payload: choose credit note if it's a refund, else invoice
@@ -413,8 +532,10 @@ class PosOrder(models.Model):
         _logger.info(f"Pos Order {ordername} data: %s", final_payload)
         return final_payload
 
-    def __get_creditnote_line_items(self, tax_mappings):
-        """Get line items in ZIMRA credit note format (with absolute values)"""
+    def __get_creditnote_line_items(self, tax_mappings, is_tax_inclusive):
+        """Get line items in ZIMRA credit note format (absolute values, basis
+        determined by is_tax_inclusive to match the IsTaxInclusive flag sent
+        to ZIMRA)."""
         line_items = []
 
         for line in self.lines:
@@ -456,25 +577,37 @@ class PosOrder(models.Model):
                 name = line.product_id.name
                 hscode = ''
 
-            # Calculate discount if applicable (ensure positive values)
+            # Basis amount: tax-inclusive or tax-exclusive line total, chosen
+            # to match is_tax_inclusive (and therefore the IsTaxInclusive
+            # flag sent to ZIMRA in the same payload).
+            basis_total = abs(
+                line.price_subtotal_incl if is_tax_inclusive else line.price_subtotal
+            )
+
+            # quantity must be extracted BEFORE it's used to derive UnitAmount,
+            # and UnitAmount must be a PER-UNIT price, not the full line total.
+            quantity = abs(line.qty) or 1  # avoid division by zero
+
+            # Calculate discount if applicable (ensure positive values), on
+            # the same basis as unit_amount/line_amount below.
             discount_amount = 0
             if line.discount:
-                discount_amount = abs(line.price_unit * line.qty * line.discount / 100)
+                unit_basis_price = basis_total / quantity
+                discount_amount = abs(unit_basis_price * line.qty * line.discount / 100)
 
-            # Ensure all line item values are positive
-            unit_amount = abs(line.price_subtotal_incl)
-            line_amount = abs(line.price_subtotal_incl)
-            quantity = abs(line.qty)
+            # Divide by quantity to get a genuine per-unit price, matching is_tax_inclusive.
+            unit_amount = basis_total / quantity
+            line_amount = basis_total - discount_amount
 
-            # Build the line item with absolute values
+            # Build the line item with absolute, tax-inclusive, internally-consistent values
             line_item = {
                 "Description": name,
-                "UnitAmount": f"{abs(unit_amount):.3f}",
+                "UnitAmount": f"{unit_amount:.3f}",
                 "TaxCode": tax_code,
                 "ProductCode": hscode,
                 "LineAmount": f"{abs(line_amount):.2f}",
                 "DiscountAmount": f"{abs(discount_amount):.2f}",
-                "Quantity": f"{abs(quantity):.3f}",
+                "Quantity": f"{quantity:.3f}",
             }
 
             line_items.append(line_item)
@@ -526,7 +659,7 @@ class PosOrder(models.Model):
             tin, vat = self._parse_vat_field(self.partner_id.vat)
 
         return {
-            "Name": self.partner_id.name,
+            "Name": self.partner_id.name or "Cash Customer",
             "Tin": tin or None,
             "VatNumber": vat or None,
             "Address": self._get_customer_address() or None,
@@ -534,8 +667,14 @@ class PosOrder(models.Model):
             "Email": self.partner_id.email or None,
         }
 
-    def __get_line_items(self, tax_mappings):
-        """ZIMRA line items without discount-only lines"""
+    def __get_line_items(self, tax_mappings, is_tax_inclusive):
+        """ZIMRA line items without discount-only lines. Basis (tax-inclusive
+        vs tax-exclusive) is driven by is_tax_inclusive so these amounts stay
+        consistent with the IsTaxInclusive flag sent in the same payload."""
+
+        # Pick the field to read line amounts from, based on is_tax_inclusive
+        def _line_basis(l):
+            return abs(l.price_subtotal_incl if is_tax_inclusive else l.price_subtotal)
 
         # --- Separate product lines and receipt discounts ---
         product_lines = []
@@ -543,13 +682,13 @@ class PosOrder(models.Model):
 
         for line in self.lines:
             if self.__is_receipt_discount_line(line):
-                receipt_discount_total += abs(line.price_subtotal_incl)
+                receipt_discount_total += _line_basis(line)
             else:
                 product_lines.append(line)
 
         # Total before receipt discount
         total_before_discount = sum(
-            l.price_subtotal_incl for l in product_lines
+            _line_basis(l) for l in product_lines
         ) or 1.0  # avoid division by zero
 
         line_items = []
@@ -570,23 +709,38 @@ class PosOrder(models.Model):
                 hscode = match.group()
                 name = re.sub(r'\b' + re.escape(hscode) + r'\b', '', name).strip()
 
-            # --- Proportional discount allocation ---
+            # --- Proportional discount allocation, on the same basis as is_tax_inclusive ---
+            line_basis = _line_basis(line)
             proportional_discount = (
                     receipt_discount_total
-                    * (line.price_subtotal_incl / total_before_discount)
+                    * (line_basis / total_before_discount)
             )
 
-            final_line_amount = line.price_subtotal_incl - proportional_discount
+            final_line_amount = line_basis - proportional_discount
 
-            # --- Product discount (line-level) ---
+            # --- Product discount (line-level), computed on the SAME basis
+            #     (inclusive or exclusive) as UnitAmount/LineAmount below, so
+            #     it stays consistent with whatever IsTaxInclusive is sent.
+            #     Previously this always used line.price_unit (tax-exclusive)
+            #     regardless of the flag, which caused UnitAmount x Quantity
+            #     to not reconcile with LineAmount + DiscountAmount whenever
+            #     the POS was configured tax-inclusive. ---
+            qty = abs(line.qty) or 1  # avoid division by zero
+            basis_unit_price = line_basis / qty
+
             line_discount = (
-                line.price_unit * line.qty * line.discount / 100
+                basis_unit_price * line.qty * line.discount / 100
                 if line.discount else 0
             )
 
             line_items.append({
                 "Description": name,
-                "UnitAmount": f"{abs(line.price_unit):.3f}",
+                # UnitAmount is the PER-UNIT price on the same basis as
+                # is_tax_inclusive (line_basis / qty), not always
+                # line.price_unit. This keeps UnitAmount x Quantity
+                # reconciled with LineAmount + DiscountAmount regardless of
+                # how the POS config prices items.
+                "UnitAmount": f"{basis_unit_price:.3f}",
                 "TaxCode": tax_code,
                 "ProductCode": hscode,
                 "LineAmount": f"{abs(final_line_amount):.2f}",
@@ -626,13 +780,21 @@ class PosOrder(models.Model):
     def _get_customer_address(self):
         """Get customer address as a structured dictionary"""
         if not self.partner_id:
-            return {}
+            return None
+
+        province = self.partner_id.state_id.name if self.partner_id.state_id else None
+        street = self.partner_id.street2
+        house_no = self.partner_id.street
+        city = self.partner_id.city
+
+        if not all([province, street, house_no, city]):
+            return None
 
         return {
-            "Province": self.partner_id.state_id.name if self.partner_id.state_id else '',
-            "Street": self.partner_id.street2 or '',
-            "HouseNo": self.partner_id.street or '',
-            "City": self.partner_id.city or ''
+            "Province": province,
+            "Street": street,
+            "HouseNo": house_no,
+            "City": city
         }
 
     def _get_payment_details(self):
@@ -655,24 +817,21 @@ class PosOrder(models.Model):
 
         # Auto-fiscalize if configuration allows and order is paid/invoiced/done
         # Don't fiscalize draft orders (quotations)
-       # if order.state in ['paid', 'invoiced', 'done']:
+        # if order.state in ['paid', 'invoiced', 'done']:
         config = self.env['zimra.config'].search([
-                ('company_id', '=', order.company_id.id),
-                ('active', '=', True),
-                ('auto_fiscalize', '=', True)
-            ], limit=1)
+            ('company_id', '=', order.company_id.id),
+            ('active', '=', True),
+            ('auto_fiscalize', '=', True)
+        ], limit=1)
 
         if config:
-                result = order._send_to_zimra()
+            result = order._send_to_zimra()
 
-                if not result:
-                    _logger.error(f"Auto-fiscalization failed for order {order.name}")
+            if not result:
+                _logger.error(f"Auto-fiscalization failed for order {order.name}")
 
         return order
 
-
-
-    @api.model
     @api.model
     def create_from_ui(self, orders, draft=False):
         """Intercept POS orders from UI and defer fiscalization until order has proper name"""
@@ -691,7 +850,7 @@ class PosOrder(models.Model):
                     # you can call a deferred job or just rely on write override later
                     continue
                 # Optionally, trigger fiscalization for already named orders
-               # order._send_to_zimra()
+            # order._send_to_zimra()
             except Exception as e:
                 _logger.exception("Error scheduling fiscalization for order %s: %s",
                                   getattr(order, 'name', 'Unknown'), str(e))
