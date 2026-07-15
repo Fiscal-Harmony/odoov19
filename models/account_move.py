@@ -4,6 +4,7 @@ from odoo.exceptions import UserError, ValidationError
 import json
 import re
 import logging
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 
 _logger = logging.getLogger(__name__)
@@ -34,6 +35,46 @@ class AccountMove(models.Model):
     zimra_verification_url = fields.Char('ZIMRA Verification URL', readonly=True, copy=False)
     fiscal_pdf_attachment_id = fields.Many2one('ir.attachment', 'Fiscal PDF', readonly=True, copy=False)
     fiscalized_pdf = fields.Char('Fiscalized Pdf', readonly=True, copy=False)
+
+    # ==================== Decimal-safe money helpers ====================
+    # Fuel/other products use deliberate 3-decimal unit pricing. Odoo's price
+    # fields are Python floats, so naive `price_unit * quantity` arithmetic
+    # (and f"{x:.2f}" formatting on the result) can inherit binary floating
+    # point error and round the wrong way on an exact half-cent (e.g. an
+    # in-memory value of 13636.2749999999 instead of 13636.275). A validator
+    # doing exact-decimal arithmetic on the same inputs will round that
+    # half-cent up, causing a mismatch. All fiscal money/qty values must be
+    # produced via these helpers instead of raw float math + f"{:.2f}".
+
+    _MONEY_Q = Decimal('0.01')
+    _QTY_Q = Decimal('0.001')
+
+    @staticmethod
+    def _dec(value):
+        """Convert an Odoo float/int to Decimal via its string repr.
+
+        Decimal(str(value)) is used deliberately instead of Decimal(value):
+        converting a float directly to Decimal preserves its exact (and
+        sometimes ugly) binary representation, e.g. Decimal(1.695) ==
+        Decimal('1.69499999999999984456877655247808434069156646728515625').
+        Going through str() first gives the decimal value the float was
+        actually meant to represent.
+        """
+        if value is None:
+            return Decimal('0')
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value))
+
+    @classmethod
+    def _quantize_money(cls, value, rounding=ROUND_HALF_UP):
+        """Round a value to 2dp using exact decimal arithmetic (half-up)."""
+        return cls._dec(value).quantize(cls._MONEY_Q, rounding=rounding)
+
+    @classmethod
+    def _quantize_qty(cls, value, rounding=ROUND_HALF_UP):
+        """Round a value to 3dp using exact decimal arithmetic (half-up)."""
+        return cls._dec(value).quantize(cls._QTY_Q, rounding=rounding)
 
     def action_fiscalize_invoice(self):
         """Manual fiscalization action for invoices"""
@@ -420,6 +461,18 @@ class AccountMove(models.Model):
             is_credit_note = self.move_type == 'out_refund'
             has_discount = any(line.discount > 0 for line in self.invoice_line_ids)
 
+            # Header totals: derive from the line items we just built (which are
+            # already exact-decimal) rather than re-deriving from Odoo's float
+            # amount_* fields, so header and line data can never disagree.
+            line_amount_sum = sum(
+                (Decimal(li["LineAmount"]) for li in line_items), Decimal('0.00')
+            )
+            # Subtotal/tax split still comes from Odoo's own totals (tax computation
+            # itself isn't the reported bug), just quantized safely via Decimal.
+            subtotal_dec = self._quantize_money(abs(self.amount_untaxed))
+            tax_dec = self._quantize_money(abs(self.amount_tax))
+            total_dec = self._quantize_money(abs(self.amount_total))
+
             if is_credit_note:
                 data = {
                     "CreditNoteId": self.name,
@@ -431,9 +484,9 @@ class AccountMove(models.Model):
                     "BuyerContact": buyer_contact,
                     "Date": timestamp,
                     "LineItems": line_items,
-                    "SubTotal": f"{abs(self.amount_untaxed):.2f}",
-                    "TotalTax": f"{abs(self.amount_tax):.2f}",
-                    "Total": f"{abs(self.amount_total):.2f}",
+                    "SubTotal": f"{subtotal_dec}",
+                    "TotalTax": f"{tax_dec}",
+                    "Total": f"{total_dec}",
                     "CurrencyCode": currency_code,
                     "IsRetry": bool(self.zimra_retry_count > 0),
                 }
@@ -447,9 +500,9 @@ class AccountMove(models.Model):
                     "BuyerContact": buyer_contact,
                     "Date": timestamp,
                     "LineItems": line_items,
-                    "SubTotal": f"{self.amount_untaxed:.2f}",
-                    "TotalTax": f"{self.amount_tax:.2f}",
-                    "Total": f"{self.amount_total:.2f}",
+                    "SubTotal": f"{subtotal_dec}",
+                    "TotalTax": f"{tax_dec}",
+                    "Total": f"{total_dec}",
                     "CurrencyCode": currency_code,
                     "IsRetry": bool(self.zimra_retry_count > 0),
                 }
@@ -516,7 +569,9 @@ class AccountMove(models.Model):
         return line_items
 
     def _prepare_line_item(self, line, tax_mappings):
-        """Prepare a single line item with error handling"""
+        """Prepare a single line item with error handling.
+
+        """
         # Skip section and note lines
         if line.display_type in ('line_section', 'line_note'):
             return None
@@ -536,27 +591,34 @@ class AccountMove(models.Model):
         # Calculate amounts based on invoice type
         is_refund = self.move_type == 'out_refund'
 
-        # Use absolute values for refunds
-        quantity = abs(line.quantity) if is_refund else line.quantity
-        unit_amount = abs(line.price_unit) if is_refund else line.price_unit
+        # Convert Odoo float fields to Decimal via str() first (see _dec docstring)
+        # before any arithmetic
+        quantity_dec = self._dec(abs(line.quantity) if is_refund else line.quantity)
+        unit_amount_dec = self._dec(abs(line.price_unit) if is_refund else line.price_unit)
+        subtotal_raw_dec = self._dec(abs(line.price_subtotal) if is_refund else line.price_subtotal)
+        price_total_raw_dec = self._dec(abs(line.price_total) if is_refund else line.price_total)
 
-        # Calculate discount: difference between gross and subtotal (before tax)
-        gross_amount = unit_amount * quantity
-        subtotal = abs(line.price_subtotal) if is_refund else line.price_subtotal
-        discount_amount = gross_amount - subtotal
 
-        # Line total (with taxes)
-        line_total = abs(line.price_total) if is_refund else line.price_total
+        gross_amount_dec = (unit_amount_dec * quantity_dec).quantize(
+            self._MONEY_Q, rounding=ROUND_HALF_UP
+        )
+        subtotal_dec = subtotal_raw_dec.quantize(self._MONEY_Q, rounding=ROUND_HALF_UP)
+        discount_amount_dec = gross_amount_dec - subtotal_dec
+
+
+        price_total_dec = price_total_raw_dec.quantize(self._MONEY_Q, rounding=ROUND_HALF_UP)
+        tax_portion_dec = price_total_dec - subtotal_dec
+        line_total_dec = gross_amount_dec + tax_portion_dec
 
         # Build line item
         return {
             "Description": name or line.name or "",
-            "UnitAmount": f"{unit_amount:.3f}",
+            "UnitAmount": f"{self._quantize_qty(unit_amount_dec)}",
             "TaxCode": tax_code,
             "ProductCode": hscode or "",
-            "LineAmount": f"{line_total:.2f}",
-            "DiscountAmount": f"{discount_amount:.2f}",
-            "Quantity": f"{quantity:.3f}",
+            "LineAmount": f"{line_total_dec}",
+            "DiscountAmount": f"{discount_amount_dec}",
+            "Quantity": f"{self._quantize_qty(quantity_dec)}",
         }
 
     def _parse_product_name(self, line):

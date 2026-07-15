@@ -4,11 +4,36 @@ import json
 import requests
 import logging
 import re
+import time
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 
 from odoo.exceptions import UserError
 
 _logger = logging.getLogger(__name__)
+
+# Fixed decimal quantization targets used for all ZIMRA money/quantity fields.
+TWO_PLACES = Decimal('0.01')
+THREE_PLACES = Decimal('0.001')
+
+
+def _to_decimal(value):
+    """Convert an Odoo float field (or any numeric/str) to Decimal via its
+    string representation.
+
+    Building the Decimal from str(value) rather than passing the float
+    directly
+    """
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def _quant(value, places=TWO_PLACES):
+    """Quantize a Decimal (or convertible value) to the given precision
+    using ROUND_HALF_UP, so a half-cent always rounds up rather than being
+    subject to binary-float-dependent rounding."""
+    return _to_decimal(value).quantize(places, rounding=ROUND_HALF_UP)
 
 
 class PosOrder(models.Model):
