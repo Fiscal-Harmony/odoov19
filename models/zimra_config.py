@@ -187,8 +187,8 @@ class ZimraConfig(models.Model):
         api_key: str = self.api_key if api_key is None else api_key
         headers = {
             "X-Api-Key": api_key,
-            "X-Application": "Odoo19",
-            "X-App-Station": "1",
+            "X-Application": "FH_Quickbooks",
+            "X-App-Station": "Excel",
             "Content-Type": "application/json"
         }
         return headers
@@ -205,8 +205,8 @@ class ZimraConfig(models.Model):
         api_key: str = self.api_key if api_key is None else api_key
         headers = {
             "X-Api-Key": api_key,
-            "X-Application": "Odoo19",
-            "X-App-Station": "1",
+            "X-Application": "FH_Quickbooks",
+            "X-App-Station": "Excel",
         }
         return headers
 
@@ -402,13 +402,42 @@ class ZimraConfig(models.Model):
 
         except requests.exceptions.HTTPError:
             log_data["error_details"] = response.reason
-            if response.status_code == 401:
-                log_data["status"] = "Unauthorised"
-                error_message = "Unauthorized access. Please check your API credentials."
-            else:
-                log_data["status"] = "Failure"
-                error_message = f"HTTP Error {response.status_code}: {response.reason}"
 
+            error_message = f"HTTP Error {response.status_code}: {response.reason}"
+
+            try:
+                error_response = response.json()
+                log_data["response"] = json.dumps(error_response, indent=2)
+
+                # Handle  Core validation errors
+                if response.status_code == 400:
+                    if "errors" in error_response:
+                        validation_errors = []
+
+                        for field, messages in error_response["errors"].items():
+                            if isinstance(messages, list):
+                                for message in messages:
+                                    validation_errors.append(f"{field}: {message}")
+                            else:
+                                validation_errors.append(f"{field}: {messages}")
+
+                        error_message = "\n".join(validation_errors)
+
+                    elif "title" in error_response:
+                        error_message = error_response["title"]
+
+                elif response.status_code == 401:
+                    log_data["status"] = "Unauthorised"
+                    error_message = "Unauthorized access. Please check your API credentials."
+
+                elif "title" in error_response:
+                    error_message = error_response["title"]
+
+            except ValueError:
+                # Response wasn't JSON
+                error_message = response.text or error_message
+
+            log_data["status"] = "Failure"
             self.__log_request(log_data)
             raise ValidationError(error_message)
 
@@ -540,9 +569,27 @@ class ZimraConfig(models.Model):
             response = self.check_fiscalisation_status(fiscalstatus, "/status")
 
             return response
-        except Exception as e:
-            _logger.error(f"Failed to send fiscal data: {str(e)}")
-            raise
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 400:
+                error_data = e.response.json()
+
+                messages = []
+
+                for field, errors in error_data.get("errors", {}).items():
+                    for error in errors:
+                        messages.append(f"{field}: {error}")
+
+                message = "\n".join(messages)
+
+
+                _logger.error("Validation failed: %s", message)
+
+                return {
+                    "status": "validation_error",
+                    "title": error_data.get("title"),
+                    "error": message,
+                    "trace_id": error_data.get("traceId"),
+                }
 
     def check_fiscalisation_status(self, data: list, route: str = "/status") -> dict:
         """Send fiscal data to ZIMRA API with signature."""
