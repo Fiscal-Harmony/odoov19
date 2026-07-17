@@ -464,6 +464,27 @@ class PosOrder(models.Model):
             dt = fields.Datetime.now()
         return dt.replace(microsecond=0).isoformat()
 
+    def get_previous_invoice_id(self, invoice_id):
+        """
+        Example:
+            261-1-000025 -> 261-1-000024
+            261-1-000001 -> 261-1-000000
+        """
+        try:
+            parts = invoice_id.split("-")
+
+            # Last part is the sequence number
+            sequence = parts[-1]
+
+            # Decrement while preserving leading zeros
+            previous = str(int(sequence) - 1).zfill(len(sequence))
+
+            # Rebuild the invoice ID
+            parts[-1] = previous
+            return "-".join(parts)
+
+        except (ValueError, TypeError, IndexError):
+            return None
     def _prepare_zimra_invoice_data(self, config):
         """Prepare invoice data for ZIMRA format"""
         # Get tax and currency mappings
@@ -537,7 +558,7 @@ class PosOrder(models.Model):
         creditnote = {
             "CreditNoteId": self.pos_reference,
             "CreditNoteNumber": self.pos_reference,
-            "OriginalInvoiceId": re.sub(r'\s+REFUND$', '', self.pos_reference).strip(),
+            "OriginalInvoiceId": self.get_previous_invoice_id(self.pos_reference),
             "Reference": self.pos_reference or '',
             "IsTaxInclusive": is_tax_inclusive,
             "BuyerContact": buyer_contact,
