@@ -133,7 +133,7 @@ class AccountMove(models.Model):
                 )
 
         except Exception as e:
-            _logger.exception(f"Unexpected error during manual fiscalization of {self.name}")
+            _logger.exception("Unexpected error during manual fiscalization of %s", self.name)
             return self._show_notification(
                 'Fiscalization Error',
                 f'An unexpected error occurred: {str(e)}',
@@ -198,7 +198,7 @@ class AccountMove(models.Model):
                 )
 
         except Exception as e:
-            _logger.exception(f"Error downloading fiscal PDF for invoice {self.name}")
+            _logger.exception("Error downloading fiscal PDF for invoice %s", self.name)
             return self._show_notification(
                 'Download Error',
                 f'Error downloading PDF: {str(e)}',
@@ -219,7 +219,7 @@ class AccountMove(models.Model):
             # Check if invoice should be fiscalized
             if not self._should_fiscalize():
                 self.zimra_status = 'exempted'
-                _logger.info(f"Invoice {self.name} marked as exempted from fiscalization")
+                _logger.info("Invoice %s marked as exempted from fiscalization", self.name)
                 return True
 
 
@@ -256,7 +256,7 @@ class AccountMove(models.Model):
             endpoint = self._determine_endpoint(invoice_data)
 
             # Send to ZIMRA
-            _logger.info(f"Sending invoice {self.name} to ZIMRA endpoint: {endpoint}")
+            _logger.info("Sending invoice %s to ZIMRA endpoint: %s", self.name, endpoint)
             response_data = config.send_fiscal_data(fiscal_invoice, endpoint)
 
             if not response_data:
@@ -272,7 +272,7 @@ class AccountMove(models.Model):
 
         except Exception as e:
             error_msg = f"Exception during fiscalization: {str(e)}"
-            _logger.exception(f"Error fiscalizing invoice {self.name}")
+            _logger.exception("Error fiscalizing invoice %s", self.name)
             self._mark_as_failed(error_msg, zimra_invoice if 'zimra_invoice' in locals() else None)
             return False
 
@@ -312,8 +312,37 @@ class AccountMove(models.Model):
                 })
 
                 _logger.info(
-                    f"Successfully fiscalized invoice {self.name} - Fiscal Number: {self.zimra_fiscal_number}"
+                    "Successfully fiscalized invoice %s - Fiscal Number: %s",
+                    self.name, self.zimra_fiscal_number
                 )
+
+                # AUTO-DOWNLOAD PDF AFTER SUCCESSFUL FISCALIZATION
+                if self.fiscalized_pdf:
+                    try:
+                        _logger.info("Attempting to auto-download PDF for invoice %s", self.name)
+                        config = self._get_active_zimra_config()
+                        if config:
+                            pdf_data = config.download_pdf(self.fiscalized_pdf)
+                            if isinstance(pdf_data, str):
+                                attachment_vals = {
+                                    'name': f'FiscalInvoice_{self.name}.pdf',
+                                    'type': 'binary',
+                                    'datas': pdf_data,
+                                    'res_model': 'account.move',
+                                    'res_id': self.id,
+                                    'mimetype': 'application/pdf',
+                                }
+                                if self.fiscal_pdf_attachment_id:
+                                    self.fiscal_pdf_attachment_id.write(attachment_vals)
+                                else:
+                                    attachment = self.env['ir.attachment'].create(attachment_vals)
+                                    self.fiscal_pdf_attachment_id = attachment.id
+                                _logger.info("Successfully auto-downloaded and stored PDF for invoice %s", self.name)
+                            else:
+                                _logger.warning("Failed to auto-download PDF for invoice %s. Status code: %s", self.name, pdf_data)
+                    except Exception as pdf_error:
+                        _logger.error("Error auto-downloading PDF for invoice %s: %s", self.name, str(pdf_error))
+
                 return True
 
             else:
@@ -324,7 +353,7 @@ class AccountMove(models.Model):
 
         except Exception as e:
             error_msg = f"Error processing ZIMRA response: {str(e)}"
-            _logger.exception(f"Error processing response for invoice {self.name}")
+            _logger.exception("Error processing response for invoice %s", self.name)
             self._mark_as_failed(error_msg, zimra_invoice)
             return False
 
@@ -343,7 +372,7 @@ class AccountMove(models.Model):
                 'zimra_fiscal_number': fiscal_number,
             })
 
-        _logger.error(f"Invoice {self.name} fiscalization failed: {error_message}")
+        _logger.error("Invoice %s fiscalization failed: %s", self.name, error_message)
 
     def _is_fiscalization_successful(self, response_data):
         """Check if fiscalization response indicates success"""
@@ -364,38 +393,44 @@ class AccountMove(models.Model):
         """Check if invoice should be fiscalized with detailed logging"""
         # Only fiscalize customer invoices and credit notes
         if not self.is_invoice(include_receipts=True):
-            _logger.debug(f"Invoice {self.name}: Not an invoice type")
+            _logger.debug("Invoice %s: Not an invoice type", self.name)
             return False
 
         # Skip if already fiscalized or exempted
         if self.zimra_status in ['fiscalized', 'exempted']:
-            _logger.debug(f"Invoice {self.name}: Already {self.zimra_status}")
+            _logger.debug("Invoice %s: Already %s", self.name, self.zimra_status)
             return False
 
         # Skip if invoice is not posted
         if self.state != 'posted':
-            _logger.debug(f"Invoice {self.name}: Not posted (state: {self.state})")
+            _logger.debug("Invoice %s: Not posted (state: %s)", self.name, self.state)
             return False
 
         # Only customer invoices and credit notes
         if self.move_type not in ['out_invoice', 'out_refund']:
-            _logger.debug(f"Invoice {self.name}: Invalid move_type: {self.move_type}")
+            _logger.debug("Invoice %s: Invalid move_type: %s", self.name, self.move_type)
             return False
 
-        _logger.debug(f"Invoice {self.name}: Should be fiscalized")
+        _logger.debug("Invoice %s: Should be fiscalized", self.name)
         return True
 
     def _get_active_zimra_config(self):
-        """Get active ZIMRA configuration using only the warehouse"""
+        """Get active ZIMRA configuration, preferring warehouse-based lookup"""
+        # Try warehouse-based lookup first (consistent with pos.order)
+        warehouse = getattr(self, 'warehouse_id', False)
+        if warehouse:
+            config = self.env['zimra.config'].get_active_config(warehouse.id)
+            if config:
+                return config
 
-
+        # Fallback to company-based lookup
         config = self.env['zimra.config'].search([
             ('company_id', '=', self.company_id.id),
             ('active', '=', True)
         ], limit=1)
 
         if not config:
-            _logger.error(f"No active ZIMRA configuration found for Company {self.company_id.name}")
+            _logger.error("No active ZIMRA configuration found for Company %s", self.company_id.name)
 
         return config
 
@@ -507,7 +542,7 @@ class AccountMove(models.Model):
                     "IsRetry": bool(self.zimra_retry_count > 0),
                 }
 
-            _logger.info(f"Prepared {'Credit Note' if is_credit_note else 'Invoice'} data for {self.name}")
+            _logger.info("Prepared %s data for %s", 'Credit Note' if is_credit_note else 'Invoice', self.name)
             return data
 
         except Exception as e:
@@ -563,7 +598,7 @@ class AccountMove(models.Model):
                 if line_item:
                     line_items.append(line_item)
             except Exception as e:
-                _logger.error(f"Error preparing line item for {line.name}: {str(e)}")
+                _logger.error("Error preparing line item for %s: %s", line.name, str(e))
                 continue
 
         return line_items
@@ -580,7 +615,7 @@ class AccountMove(models.Model):
         tax_code = ""
         if line.tax_ids:
             for tax in line.tax_ids:
-                _logger.info(f"Preparing tax code {line.tax_ids.name}")
+                _logger.info("Preparing tax code %s", line.tax_ids.name)
                 if tax.id in tax_mappings:
                     tax_code = tax_mappings[tax.id].zimra_tax_code
                     break
@@ -642,7 +677,7 @@ class AccountMove(models.Model):
                     # Clean up multiple spaces
                     name = re.sub(r'\s+', ' ', name)
             except ValueError:
-                _logger.warning(f"Regex failed when parsing product name for line '{line.name}'")
+                _logger.warning("Regex failed when parsing product name for line '%s'", line.name)
                 pass
 
         return name, hscode
@@ -707,7 +742,7 @@ class AccountMove(models.Model):
                 move.write({
                     'zimra_status': 'cancelled',
                 })
-                _logger.info(f"Cancelled fiscalized invoice {move.name}")
+                _logger.info("Cancelled fiscalized invoice %s", move.name)
 
         return result
 
@@ -730,7 +765,7 @@ class AccountMove(models.Model):
                     'fiscalized_pdf': False,
                     'zimra_retry_count': 0,
                 })
-                _logger.info(f"Reset ZIMRA status for invoice {move.name}")
+                _logger.info("Reset ZIMRA status for invoice %s", move.name)
 
         return result
 
@@ -739,11 +774,8 @@ class AccountMove(models.Model):
         """Override create to set initial ZIMRA status"""
         move = super(AccountMove, self).create(vals)
 
-        # Set initial status for invoices
         if move.is_invoice() and move.move_type in ['out_invoice', 'out_refund']:
             move.zimra_status = 'pending'
-
-
         else:
             move.zimra_status = 'exempted'
 
@@ -789,7 +821,7 @@ class AccountMove(models.Model):
             'type': 'ir.actions.act_window',
             'name': f'ZIMRA Logs - {self.name}',
             'res_model': 'zimra.invoice',
-            'view_mode': 'tree,form',
+            'view_mode': 'list,form',
             'domain': [('account_move_id', '=', self.id)],
             'context': {'default_account_move_id': self.id}
         }
@@ -804,7 +836,7 @@ class AccountMove(models.Model):
             ('state', '=', 'posted')
         ])
 
-        _logger.info(f"Cron: Found {len(failed_invoices)} failed invoices to retry")
+        _logger.info("Cron: Found %d failed invoices to retry", len(failed_invoices))
 
         success_count = 0
         fail_count = 0
@@ -814,12 +846,12 @@ class AccountMove(models.Model):
                 result = invoice._send_to_zimra()
                 if result:
                     success_count += 1
-                    _logger.info(f"Cron: Successfully retried fiscalization for invoice: {invoice.name}")
+                    _logger.info("Cron: Successfully retried fiscalization for invoice: %s", invoice.name)
                 else:
                     fail_count += 1
-                    _logger.warning(f"Cron: Retry failed for invoice {invoice.name}: {invoice.zimra_error}")
+                    _logger.warning("Cron: Retry failed for invoice %s: %s", invoice.name, invoice.zimra_error)
             except Exception as e:
                 fail_count += 1
-                _logger.exception(f"Cron: Exception during retry for invoice {invoice.name}")
+                _logger.exception("Cron: Exception during retry for invoice %s", invoice.name)
 
-        _logger.info(f"Cron completed: {success_count} successful, {fail_count} failed")
+        _logger.info("Cron completed: %d successful, %d failed", success_count, fail_count)

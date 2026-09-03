@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-from email.policy import default
 
 from odoo import models, fields, api
 from odoo.exceptions import ValidationError
@@ -9,7 +8,7 @@ import logging
 import hmac
 import hashlib
 import base64
-from datetime import datetime, time
+from datetime import datetime
 import time
 
 _logger = logging.getLogger(__name__)
@@ -27,11 +26,17 @@ class ZimraConfig(models.Model):
     api_secret = fields.Char('API Secret', required=True)
     company_id = fields.Many2one('res.company', 'Company', required=True,
                                  default=lambda self: self.env.company)
+    multi_branch = fields.Boolean(
+        'Multi-Branch Mode',
+        default=False,
+        help='ON: Each branch/warehouse has its own configuration, API keys and mappings\n'
+             'OFF: One shared configuration works for all branches'
+    )
     warehouse_id = fields.Many2one(
         'stock.warehouse',
         string='Warehouse',
-        required=True,
-        help='Warehouse / outlet this fiscal device belongs to'
+        required=False,
+        help='Warehouse / outlet this fiscal device belongs to (required when Multi-Branch is ON)'
     )
     active = fields.Boolean('Active', default=True)
     userId = fields.Integer('Fiscal Harmony User ID', default=0)
@@ -42,6 +47,8 @@ class ZimraConfig(models.Model):
                                     help='Automatically fiscalize POS orders when paid')
     retry_count = fields.Integer('Retry Count', default=8,
                                  help='Number of times to retry failed requests')
+    poll_delay = fields.Integer('Status Poll Delay (seconds)', default=6,
+                                help='Seconds to wait before polling fiscalisation status')
 
     # Tax and Currency Mappings
     tax_mapping_ids = fields.One2many('zimra.tax.mapping', 'config_id', 'Tax Mappings')
@@ -57,10 +64,6 @@ class ZimraConfig(models.Model):
     device_taxes_synced = fields.Boolean('Device Taxes Synced')
     last_tax_sync = fields.Datetime('Last Tax Sync')
 
-    # FIXED: Removed the company_unique constraint to allow multiple configurations per company
-    # Only one active configuration per company is enforced via Python constraint
-    _sql_constraints = []
-
     @api.model
     def get_active_config(self, company_id=None):
         """Get the active configuration for the current or specified company."""
@@ -73,17 +76,22 @@ class ZimraConfig(models.Model):
         ], limit=1)
 
         if not config:
-            _logger.warning(f"No active ZIMRA configuration found for company {company_id}")
+            _logger.warning("No active ZIMRA configuration found for company %s", company_id)
 
         return config
 
-    @api.constrains('warehouse_id', 'active')
+    @api.constrains('warehouse_id', 'active', 'multi_branch')
     def _check_single_active_per_warehouse(self):
         for record in self:
-            if record.active:
+            if record.active and record.multi_branch:
+                if not record.warehouse_id:
+                    raise ValidationError(
+                        "Warehouse is required when Multi-Branch Mode is ON."
+                    )
                 other = self.search([
                     ('warehouse_id', '=', record.warehouse_id.id),
                     ('active', '=', True),
+                    ('multi_branch', '=', True),
                     ('id', '!=', record.id)
                 ], limit=1)
                 if other:
@@ -91,32 +99,49 @@ class ZimraConfig(models.Model):
                         f"An active ZIMRA configuration already exists for "
                         f"warehouse {record.warehouse_id.name}."
                     )
-    @api.model
-    def get_config_for_order(self, order):
-        """Get configuration for a specific order based on its company."""
-        if not order or not order.company_id:
-            return False
-
-        return self.get_active_config(order.company_id.id)
+            elif record.active and not record.multi_branch:
+                other = self.search([
+                    ('multi_branch', '=', False),
+                    ('active', '=', True),
+                    ('company_id', '=', record.company_id.id),
+                    ('id', '!=', record.id)
+                ], limit=1)
+                if other:
+                    raise ValidationError(
+                        f"An active shared ZIMRA configuration already exists for "
+                        f"company {record.company_id.name}."
+                    )
 
     @api.model
     def get_active_config(self, warehouse_id=None):
-        """Fetch active config for a given warehouse."""
+        """Fetch active config for a given warehouse.
+        First tries warehouse-specific config, then falls back to shared config."""
         domain = [('active', '=', True)]
+
+        # Try warehouse-specific config first
         if warehouse_id:
-            domain.append(('warehouse_id', '=', warehouse_id))
-        config = self.search(domain, limit=1)
+            config = self.search(domain + [
+                ('warehouse_id', '=', warehouse_id),
+                ('multi_branch', '=', True),
+            ], limit=1)
+            if config:
+                return config
+
+        # Fallback to shared config (multi_branch=False, no warehouse)
+        config = self.search(domain + [
+            ('multi_branch', '=', False),
+        ], limit=1)
+
         if not config:
-            _logger.warning(f"No active ZIMRA configuration found for warehouse {warehouse_id}")
+            _logger.warning("No active ZIMRA configuration found for warehouse %s", warehouse_id)
         return config
 
     @api.model
     def get_config_for_order(self, order):
-        warehouse = (
-            order.session_id.config_id.warehouse_id
-            if order and order._name == 'pos.order'
-            else getattr(order, 'warehouse_id', False)
-        )
+        """Get configuration for a specific POS order based on its warehouse."""
+        if not order:
+            return False
+        warehouse = order.session_id.config_id.warehouse_id if order._name == 'pos.order' else getattr(order, 'warehouse_id', False)
         return self.get_active_config(warehouse.id) if warehouse else False
 
     @api.depends('company_id', 'warehouse_id')
@@ -144,21 +169,6 @@ class ZimraConfig(models.Model):
             record.total_failed = PosOrder.search_count(
                 domain + [('zimra_status', '=', 'failed')]
             )
-
-    @api.constrains('warehouse_id', 'active')
-    def _check_unique_active_per_warehouse(self):
-        for record in self:
-            if record.active and record.warehouse_id:
-                other_active = self.search([
-                    ('warehouse_id', '=', record.warehouse_id.id),
-                    ('active', '=', True),
-                    ('id', '!=', record.id)
-                ])
-                if other_active:
-                    raise ValidationError(
-                        f"An active configuration already exists for warehouse '{record.warehouse_id.name}'. "
-                        "Please deactivate it first or set this configuration as inactive."
-                    )
 
     @api.constrains('api_key')
     def _check_api_key(self):
@@ -222,20 +232,22 @@ class ZimraConfig(models.Model):
 
     def __log_request(self, log_data: dict):
         """Log request data for debugging and monitoring."""
-        log_message = f"ZIMRA API Request - Status: {log_data.get('status', 'Unknown')}"
+        log_message = "ZIMRA API Request - Status: %s"
+        log_args = [log_data.get('status', 'Unknown')]
         if log_data.get('error_details'):
-            log_message += f" - Error: {log_data['error_details']}"
+            log_message += " - Error: %s"
+            log_args.append(log_data['error_details'])
 
-        _logger.info(f"{log_message} - URL: {log_data.get('request_url', 'N/A')}")
+        _logger.info(log_message + " - URL: %s", *log_args, log_data.get('request_url', 'N/A'))
 
         if log_data.get('response'):
-            _logger.debug(f"Response: {log_data['response']}")
+            _logger.debug("Response: %s", log_data['response'])
 
     def __make_request(self, route: str) -> requests.Response:
         """Generates and processes a standard GET request to the Fiscal Harmony API."""
         request_url = self.__get_request_url(route)
         headers = self.__get_authheaders()
-        _logger.info(f"Request Headers: {headers}")
+        _logger.info("Request Headers: %s", headers)
 
         log_data = {
             "request_url": request_url,
@@ -336,8 +348,8 @@ class ZimraConfig(models.Model):
                     body = data
 
         headers = self.__get_signed_headers(body)
-        _logger.info(f"Request URL: {request_url}")
-        _logger.info(f"Request Headers: {headers}")
+        _logger.info("Request URL: %s", request_url)
+        _logger.info("Request Headers: %s", headers)
 
         log_data = {
             "request_url": request_url,
@@ -550,12 +562,12 @@ class ZimraConfig(models.Model):
         elif isinstance(data, dict):
             preview = data
         else:
-            _logger.error(f"Unsupported type for data: {type(data)}")
+            _logger.error("Unsupported type for data: %s", type(data))
             return {"status": "error", "reason": "unsupported data type"}
 
         ref = preview.get("Reference", "")
         if isinstance(ref, str) and ref.startswith("Shop/"):
-            _logger.info(f"Skipping fiscalisation for reference starting with 'Shop/': {ref}")
+            _logger.info("Skipping fiscalisation for reference starting with 'Shop/': %s", ref)
             return {"status": "skipped", "reason": "Shop reference"}
 
         try:
@@ -565,7 +577,7 @@ class ZimraConfig(models.Model):
             fiscalstatus = [parsed]
             _logger.info("StatusString %s", fiscalstatus)
 
-            time.sleep(6)
+            time.sleep(self.poll_delay or 6)
             response = self.check_fiscalisation_status(fiscalstatus, "/status")
 
             return response
@@ -600,7 +612,7 @@ class ZimraConfig(models.Model):
             _logger.info(" Transaction response: %s", response.json())
             return response.json()
         except Exception as e:
-            _logger.error(f"Failed to check status: {str(e)}")
+            _logger.error("Failed to check status: %s", str(e))
             raise
 
     def retry_failed_request(self, route: str, data: dict = None, method: str = 'GET') -> dict:
@@ -628,7 +640,7 @@ class ZimraConfig(models.Model):
             'type': 'ir.actions.act_window',
             'name': 'POS Orders',
             'res_model': 'pos.order',
-            'view_mode': 'tree,form',
+            'view_mode': 'list,form',
             'domain': [('company_id', '=', self.company_id.id)],
             'context': {'default_company_id': self.company_id.id}
         }
@@ -640,7 +652,7 @@ class ZimraConfig(models.Model):
             'type': 'ir.actions.act_window',
             'name': 'Failed Orders',
             'res_model': 'pos.order',
-            'view_mode': 'tree,form',
+            'view_mode': 'list,form',
             'domain': [
                 ('company_id', '=', self.company_id.id),
                 ('zimra_status', '=', 'failed')
@@ -675,10 +687,10 @@ class ZimraConfig(models.Model):
                 return simplified_taxes
 
             else:
-                _logger.error(f"Failed to fetch device taxes: Status {response.status_code}")
+                _logger.error("Failed to fetch device taxes: Status %s", response.status_code)
                 return None
         except Exception as e:
-            _logger.error(f"Error fetching device taxes: {str(e)}")
+            _logger.error("Error fetching device taxes: %s", str(e))
             return None
 
     def download_pdf(self, fiscalpdf: str):
@@ -709,7 +721,7 @@ class ZimraConfig(models.Model):
             existing_mappings = TaxMapping.search([('config_id', '=', self.id)])
             if existing_mappings:
                 existing_mappings.unlink()
-                _logger.info(f"Deleted {len(existing_mappings)} existing tax mappings")
+                _logger.info("Deleted %d existing tax mappings", len(existing_mappings))
 
             created_count = 0
 
@@ -718,7 +730,7 @@ class ZimraConfig(models.Model):
                 tax_name = tax_data.get('taxName', '')
 
                 if not tax_id or not tax_name:
-                    _logger.warning(f"Skipping invalid tax data: {tax_data}")
+                    _logger.warning("Skipping invalid tax data: %s", tax_data)
                     continue
 
                 normalized_tax_type = TaxMapping.normalize_tax_type(tax_name)
@@ -740,7 +752,7 @@ class ZimraConfig(models.Model):
                     _logger.info("Created tax mapping: %s -> %s (Rate: %.2f%%, Code: %s)",
                                  tax_name, normalized_tax_type, tax_rate, tax_id)
                 except Exception as e:
-                    _logger.error(f"Failed to create tax mapping for {tax_name}: {str(e)}")
+                    _logger.error("Failed to create tax mapping for %s: %s", tax_name, str(e))
                     import traceback
                     _logger.error(traceback.format_exc())
                     continue
@@ -763,7 +775,7 @@ class ZimraConfig(models.Model):
             }
 
         except ValidationError as ve:
-            _logger.error(f"Validation error syncing device taxes: {str(ve)}")
+            _logger.error("Validation error syncing device taxes: %s", str(ve))
             return {
                 'type': 'ir.actions.client',
                 'tag': 'display_notification',
@@ -775,7 +787,7 @@ class ZimraConfig(models.Model):
                 }
             }
         except Exception as e:
-            _logger.error(f"Failed to sync device taxes: {str(e)}")
+            _logger.error("Failed to sync device taxes: %s", str(e))
             import traceback
             _logger.error(traceback.format_exc())
             return {
@@ -798,7 +810,7 @@ class ZimraConfig(models.Model):
             if rate_match:
                 return float(rate_match.group(1))
         except Exception as e:
-            _logger.warning(f"Could not extract rate from tax name '{tax_name}': {e}")
+            _logger.warning("Could not extract rate from tax name '%s': %s", tax_name, e)
 
         return 0.0
 
@@ -850,9 +862,9 @@ class ZimraConfig(models.Model):
         for config in active_configs:
             try:
                 config.sync_device_taxes()
-                _logger.info(f"Successfully synced taxes for config: {config.name}")
+                _logger.info("Successfully synced taxes for config: %s", config.name)
             except Exception as e:
-                _logger.error(f"Failed to sync taxes for config {config.name}: {str(e)}")
+                _logger.error("Failed to sync taxes for config %s: %s", config.name, str(e))
 
     def send_fiscal_data_with_validation(self, data: dict, route: str = "/fiscalize") -> dict:
         """Send fiscal data with tax validation against device taxes."""

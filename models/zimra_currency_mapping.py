@@ -21,14 +21,6 @@ class ZimraCurrencyMapping(models.Model):
         for record in self:
             record.display_name = f"{record.odoo_currency_id.name} → {record.zimra_currency_code}"
 
-    @api.constrains('zimra_currency_code')
-    def _check_currency_code(self):
-        for record in self:
-            if len(record.zimra_currency_code) == 6:
-                raise ValidationError('ZIMRA Currency Code not exceeed 5 characters')
-            if not record.zimra_currency_code.isupper():
-                raise ValidationError('ZIMRA Currency Code must be uppercase')
-
     def save_line_currencymapping(self):
         for rec in self:
             if rec.config_id:

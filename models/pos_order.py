@@ -76,7 +76,7 @@ class PosOrder(models.Model):
         self.ensure_one()
 
         if not self.fiscal_pdf_attachment_id:
-            _logger.warning(f"No fiscal PDF attachment found for order {self.name}")
+            _logger.warning("No fiscal PDF attachment found for order %s", self.name)
             return False
 
         try:
@@ -92,15 +92,15 @@ class PosOrder(models.Model):
                         'printer_id': printer.id,
                         'attachment_id': self.fiscal_pdf_attachment_id.id,
                     })
-                    _logger.info(f"Sent fiscal PDF to printer {printer.name} for order {self.name}")
+                    _logger.info("Sent fiscal PDF to printer %s for order %s", printer.name, self.name)
                     return True
 
             # Fallback - use default system printer
-            _logger.info(f"Using default printer for fiscal PDF order {self.name}")
+            _logger.info("Using default printer for fiscal PDF order %s", self.name)
             return True
 
         except Exception as e:
-            _logger.error(f"Error printing fiscal PDF for order {self.name}: {str(e)}")
+            _logger.error("Error printing fiscal PDF for order %s: %s", self.name, str(e))
             # Don't fail the fiscalization - just log the error
             return False
 
@@ -128,7 +128,7 @@ class PosOrder(models.Model):
         }
 
         self.env['bus.bus']._sendone(channel, 'notification', message)
-        _logger.info(f"Sent fiscal PDF notification for order {self.name} to channel {channel}")
+        _logger.info("Sent fiscal PDF notification for order %s to channel %s", self.name, channel)
 
     def action_fiscalize_manual(self):
         """Manual fiscalization action"""
@@ -233,7 +233,7 @@ class PosOrder(models.Model):
         if existing_fiscalized:
             self.zimra_status = 'exempted'
             self.zimra_error = f'Invoice {self.name} already fiscalized in order {existing_fiscalized.id}'
-            _logger.warning(f"Skipping fiscalization - Invoice {self.name} already fiscalized")
+            _logger.warning("Skipping fiscalization - Invoice %s already fiscalized", self.name)
             return True
 
         # Get configuration
@@ -244,7 +244,7 @@ class PosOrder(models.Model):
         if not config:
             self.zimra_status = 'failed'
             self.zimra_error = 'No active FiscalHarmony configuration found'
-            _logger.error(f"No ZIMRA configuration found for company {self.company_id.name}")
+            _logger.error("No ZIMRA configuration found for company %s", self.company_id.name)
             return False
 
         # Check if order should be fiscalized
@@ -333,12 +333,12 @@ class PosOrder(models.Model):
                 })
 
                 _logger.info(
-                    f"Successfully fiscalized POS order {self.name} - Fiscal Number: {self.zimra_fiscal_number}")
+                    "Successfully fiscalized POS order %s - Fiscal Number: %s", self.name, self.zimra_fiscal_number)
                 _logger.info("QrData value: %s", response.get('QrData'))
                 # AUTO-DOWNLOAD PDF AFTER SUCCESSFUL FISCALIZATION
                 if self.fiscalized_pdf:
                     try:
-                        _logger.info(f"Attempting to auto-download PDF for order {self.name}")
+                        _logger.info("Attempting to auto-download PDF for order %s", self.name)
                         pdf_data = config.download_pdf(self.fiscalized_pdf)
 
                         if isinstance(pdf_data, str):
@@ -357,15 +357,15 @@ class PosOrder(models.Model):
                                 attachment = self.env['ir.attachment'].create(attachment_vals)
                                 self.fiscal_pdf_attachment_id = attachment.id
 
-                            _logger.info(f"Successfully auto-downloaded and stored PDF for order {self.name}")
+                            _logger.info("Successfully auto-downloaded and stored PDF for order %s", self.name)
                             self._auto_print_fiscal_pdf()
                             self._notify_pos_pdf_ready()
                         else:
                             _logger.warning(
-                                f"Failed to auto-download PDF for order {self.name}. Status code: {pdf_data}")
+                                "Failed to auto-download PDF for order %s. Status code: %s", self.name, pdf_data)
 
                     except Exception as pdf_error:
-                        _logger.error(f"Error auto-downloading PDF for order {self.name}: {str(pdf_error)}")
+                        _logger.error("Error auto-downloading PDF for order %s: %s", self.name, str(pdf_error))
 
                 return True
 
@@ -383,7 +383,7 @@ class PosOrder(models.Model):
                 })
 
                 _logger.error(
-                    f"Failed to fiscalize POS order {self.name} - Error: {self.zimra_error}")
+                    "Failed to fiscalize POS order %s - Error: %s", self.name, self.zimra_error)
                 return False
 
         except Exception as e:
@@ -397,7 +397,7 @@ class PosOrder(models.Model):
                     'error_message': error_msg,
                 })
 
-            _logger.error(f"Error fiscalizing POS order {self.name}: {error_msg}")
+            _logger.error("Error fiscalizing POS order %s: %s", self.name, error_msg)
             return False
 
     def _is_fiscalization_successful(self, response_data):
@@ -442,7 +442,7 @@ class PosOrder(models.Model):
 
         # Don't fiscalize draft orders (quotations) or cancelled orders
         if self.state in ['draft', 'cancel']:
-            _logger.info(f"Skipping fiscalization for order {self.name} - State: {self.state}")
+            _logger.info("Skipping fiscalization for order %s - State: %s", self.name, self.state)
             return False
 
         # For refunds (negative amounts), fiscalize immediately regardless of state
@@ -451,7 +451,7 @@ class PosOrder(models.Model):
 
         # For positive amounts, only fiscalize paid orders
         if self.amount_total > 0 and self.state in ['draft']:
-            _logger.info(f"Skipping fiscalization for order {self.name} - Order in draft (State: {self.state})")
+            _logger.info("Skipping fiscalization for order %s - Order in draft (State: %s)", self.name, self.state)
             return False
 
         return True
@@ -575,7 +575,7 @@ class PosOrder(models.Model):
         final_payload = creditnote if is_refund else data
         ordername = "Credit Note" if is_refund else "Invoice"
 
-        _logger.info(f"Pos Order {ordername} data: %s", final_payload)
+        _logger.info("Pos Order %s data: %s", ordername, final_payload)
         return final_payload
 
     def __get_creditnote_line_items(self, tax_mappings, is_tax_inclusive):
@@ -659,22 +659,6 @@ class PosOrder(models.Model):
             line_items.append(line_item)
 
         return line_items
-
-    def _get_original_invoice_reference(self):
-
-        # Option 3: Search for related positive order (this is a basic example)
-        if self.amount_total < 0:  # This is a refund/credit note
-            # Try to find a related positive order - this logic depends on your implementation
-            original_order = self.search([
-                ('partner_id', '=', self.partner_id.id if self.partner_id else False),
-                ('amount_total', '>', 0),
-                ('date_order', '<=', self.date_order),
-                ('zimra_status', '=', 'fiscalized')
-            ], order='date_order desc', limit=1)
-
-            return original_order.name if original_order else ""
-
-        return ""
 
     def _get_return_reason(self):
         """Get the reason for return/credit note"""
@@ -874,7 +858,7 @@ class PosOrder(models.Model):
             result = order._send_to_zimra()
 
             if not result:
-                _logger.error(f"Auto-fiscalization failed for order {order.name}")
+                _logger.error("Auto-fiscalization failed for order %s", order.name)
 
         return order
 
@@ -967,7 +951,7 @@ class PosOrder(models.Model):
             'type': 'ir.actions.act_window',
             'name': 'ZIMRA Logs',
             'res_model': 'zimra.invoice',
-            'view_mode': 'tree,form',
+            'view_mode': 'list,form',
             'domain': [('pos_order_id', '=', self.id)],
             'context': {'default_pos_order_id': self.id}
         }
@@ -1047,7 +1031,7 @@ class PosOrder(models.Model):
                 }
 
         except Exception as e:
-            _logger.error(f"Error downloading fiscal PDF for invoice {self.name}: {str(e)}")
+            _logger.error("Error downloading fiscal PDF for invoice %s: %s", self.name, str(e))
             return {
                 'type': 'ir.actions.client',
                 'tag': 'display_notification',
@@ -1069,6 +1053,6 @@ class PosOrder(models.Model):
         for order in failed_orders:
             try:
                 order._send_to_zimra()
-                _logger.info(f"Successfully retried fiscalization for order: {order.name}")
+                _logger.info("Successfully retried fiscalization for order: %s", order.name)
             except Exception as e:
-                _logger.error(f"Failed to retry fiscalization for order {order.name}: {str(e)}")
+                _logger.error("Failed to retry fiscalization for order %s: %s", order.name, str(e))

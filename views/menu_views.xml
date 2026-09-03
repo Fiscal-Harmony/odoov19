@@ -1,16 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <odoo>
-    <!-- Optional: Config menu section (use existing if one exists) -->
+    <!-- Root Menu -->
     <menuitem id="menu_zimra_config_root"
               name="Fiscal Harmony"
-              web_icon="fiscalharmony_zimra_intergration/static/description/logo.svg"
+              web_icon="odoov19,static/description/logo.svg"
               sequence="100"
               groups="base.group_user"/>
 
-    <!-- ZIMRA Config submenu item -->
+    <!-- Dashboard Action -->
+    <record id="action_fiscal_dashboard" model="ir.actions.client">
+        <field name="name">Fiscal Dashboard</field>
+        <field name="tag">fiscal_dashboard</field>
+    </record>
+
+    <!-- Dashboard Menu Item -->
+    <menuitem id="menu_fiscal_dashboard"
+              name="Dashboard"
+              parent="menu_zimra_config_root"
+              action="action_fiscal_dashboard"
+              sequence="5"/>
+
+    <!-- Config Menu Item -->
     <menuitem id="menu_zimra_config_settings"
-              name="Fiscal Harmony API settings"
+              name="API Settings"
               parent="menu_zimra_config_root"
               action="action_zimra_config"
               sequence="10"/>
-
 </odoo>

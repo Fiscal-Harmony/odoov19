@@ -230,7 +230,7 @@ class ZimraInvoice(models.Model):
             'type': 'ir.actions.act_window',
             'name': 'POS Orders',
             'res_model': 'pos.order',
-            'view_mode': 'tree,form',
+            'view_mode': 'list,form',
             'domain': [('company_id', '=', self.company_id.id)],
             'context': {'default_company_id': self.company_id.id}
         }
@@ -242,28 +242,10 @@ class ZimraInvoice(models.Model):
             'type': 'ir.actions.act_window',
             'name': 'Failed Orders',
             'res_model': 'pos.order',
-            'view_mode': 'tree,form',
+            'view_mode': 'list,form',
             'domain': [
                 ('company_id', '=', self.company_id.id),
                 ('zimra_status', '=', 'failed')
             ],
             'context': {'default_company_id': self.company_id.id}
         }
-
-    total_sent = fields.Integer('Total Sent', compute='_compute_statistics')
-    total_fiscalized = fields.Integer('Total Fiscalized', compute='_compute_statistics')
-    total_failed = fields.Integer('Total Failed', compute='_compute_statistics')
-    @api.depends('company_id')
-    def _compute_statistics(self):
-        for record in self:
-            domain = [('company_id', '=', record.company_id.id)]
-
-            record.total_sent = self.env['pos.order'].search_count(
-                domain + [('zimra_status', 'in', ['sent', 'fiscalized'])]
-            )
-            record.total_fiscalized = self.env['pos.order'].search_count(
-                domain + [('zimra_status', '=', 'fiscalized')]
-            )
-            record.total_failed = self.env['pos.order'].search_count(
-                domain + [('zimra_status', '=', 'failed')]
-            )

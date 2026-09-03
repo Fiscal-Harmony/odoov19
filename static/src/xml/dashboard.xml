@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-name="odoov19.FiscalDashboard" owl="1">
+        <div class="o_fiscal_dashboard h-100">
+            <!-- Loading State -->
+            <div t-if="state.loading" class="text-center py-5">
+                <i class="fa fa-spinner fa-spin fa-3x text-muted"/>
+                <p class="mt-3 text-muted">Loading dashboard...</p>
+            </div>
+
+            <!-- Dashboard Content -->
+            <div t-if="!state.loading" class="d-flex h-100 ms-4 mt-3" style="min-height: calc(100vh - 120px);">
+
+                <!-- LEFT SIDE: Stats, Chart, Errors -->
+                <div class="d-flex flex-column" style="width: 520px; min-width: 520px; overflow-y: auto;">
+
+                    <!-- Date Range Filter -->
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="mb-0">
+                            <i class="fa fa-tachometer me-2"/>
+                            Dashboard
+                        </h5>
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button type="button" class="btn btn-outline-primary"
+                                    t-att-class="{'active': state.days === 1}"
+                                    t-on-click="() => this.setDays(1)">Today</button>
+                            <button type="button" class="btn btn-outline-primary"
+                                    t-att-class="{'active': state.days === 7}"
+                                    t-on-click="() => this.setDays(7)">This Week</button>
+                            <button type="button" class="btn btn-outline-primary"
+                                    t-att-class="{'active': state.days === 30}"
+                                    t-on-click="() => this.setDays(30)">This Month</button>
+                            <button type="button" class="btn btn-outline-primary"
+                                    t-att-class="{'active': state.days === 90}"
+                                    t-on-click="() => this.setDays(90)">90 Days</button>
+                        </div>
+                    </div>
+
+                    <!-- Compact Summary Cards -->
+                    <div class="row g-3 mb-3">
+                        <div class="col-4">
+                            <div class="card text-bg-primary">
+                                <div class="card-body text-center py-3">
+                                    <div class="d-flex align-items-center justify-content-center">
+                                        <i class="fa fa-database me-3 fs-3"/>
+                                        <div>
+                                            <div class="fs-3 fw-bold" t-out="state.summary.total"/>
+                                            <div class="small opacity-75">Total</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="card text-bg-success">
+                                <div class="card-body text-center py-3">
+                                    <div class="d-flex align-items-center justify-content-center">
+                                        <i class="fa fa-check-circle me-3 fs-3"/>
+                                        <div>
+                                            <div class="fs-3 fw-bold" t-out="state.summary.fiscalized"/>
+                                            <div class="small opacity-75">Fiscalized</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="card text-bg-danger">
+                                <div class="card-body text-center py-3">
+                                    <div class="d-flex align-items-center justify-content-center">
+                                        <i class="fa fa-times-circle me-3 fs-3"/>
+                                        <div>
+                                            <div class="fs-3 fw-bold" t-out="state.summary.failed"/>
+                                            <div class="small opacity-75">Failed</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Mini Status Row -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-4">
+                            <div class="card">
+                                <div class="card-body text-center py-2">
+                                    <span class="badge bg-warning text-dark px-3 py-2">
+                                        <i class="fa fa-clock-o me-1"/>
+                                        <span t-out="state.summary.pending"/> Pending
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="card">
+                                <div class="card-body text-center py-2">
+                                    <span class="badge bg-info px-3 py-2">
+                                        <i class="fa fa-paper-plane me-1"/>
+                                        <span t-out="state.summary.sent"/> Sent
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-4">
+                            <div class="card">
+                                <div class="card-body text-center py-2">
+                                    <span class="badge bg-secondary px-3 py-2">
+                                        <i class="fa fa-ban me-1"/>
+                                        <span t-out="state.summary.cancelled"/> Cancelled
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Pie Chart -->
+                    <div class="card mb-4">
+                        <div class="card-header py-2">
+                            <h6 class="mb-0">
+                                <i class="fa fa-chart-pie me-2"/>
+                                Fiscalisation Overview
+                            </h6>
+                        </div>
+                        <div class="card-body p-3">
+                            <div t-if="state.dailyData.length === 0" class="text-center py-4 text-muted">
+                                <i class="fa fa-bar-chart fa-2x mb-2"/>
+                                <p class="small mb-0">No data available</p>
+                            </div>
+                            <div t-if="state.dailyData.length > 0" style="height: 260px;">
+                                <canvas t-ref="pieChart"/>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Common Errors -->
+                    <div class="card flex-grow-1">
+                        <div class="card-header bg-danger text-white py-2">
+                            <h6 class="mb-0">
+                                <i class="fa fa-exclamation-triangle me-2"/>
+                                Common Errors
+                            </h6>
+                        </div>
+                        <div class="card-body p-0" style="max-height: 250px; overflow-y: auto;">
+                            <div t-if="state.commonErrors.length === 0" class="text-center py-4 text-muted">
+                                <i class="fa fa-check-circle fa-2x mb-2 text-success"/>
+                                <p class="small mb-0">No errors recorded</p>
+                            </div>
+                            <div t-if="state.commonErrors.length > 0" class="list-group list-group-flush list-group-flush">
+                                <t t-foreach="state.commonErrors" t-as="error" t-key="error.error">
+                                    <div class="list-group-item py-2 px-3">
+                                        <div class="d-flex justify-content-between align-items-start">
+                                            <div class="text-truncate me-2 small" style="flex: 1;" t-esc="error.error"/>
+                                            <span class="badge bg-danger rounded-pill" t-esc="error.count"/>
+                                        </div>
+                                    </div>
+                                </t>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- RIGHT SIDE: Fiscal Harmony App (fills remaining space) -->
+                <div class="flex-grow-1 ms-3">
+                    <div class="card h-100">
+                        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center py-2">
+                            <h6 class="mb-0">
+                                <i class="fa fa-cloud me-2"/>
+                                Fiscal Harmony Portal
+                            </h6>
+                            <a href="https://app.fiscalharmony.co.zw" target="_blank" class="btn btn-light btn-sm py-0">
+                                <i class="fa fa-external-link me-1"/>
+                                Open in New Tab
+                            </a>
+                        </div>
+                        <div class="card-body p-0">
+                            <iframe src="https://app.fiscalharmony.co.zw"
+                                    style="width: 100%; height: 100%; min-height: calc(100vh - 160px); border: none;"
+                                    loading="lazy"
+                                    allowfullscreen="true"/>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </t>
+</templates>

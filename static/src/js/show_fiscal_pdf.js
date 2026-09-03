@@ -17,7 +17,7 @@ class FiscalPdfViewer extends Component {
     }
 }
 
-FiscalPdfViewer.template = "your_module.FiscalPdfViewer";
+FiscalPdfViewer.template = "odoov19.FiscalPdfViewer";
 FiscalPdfViewer.props = {
     pdf_data: String,
 };
