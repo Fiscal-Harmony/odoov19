@@ -496,6 +496,14 @@ class AccountMove(models.Model):
             is_credit_note = self.move_type == 'out_refund'
             has_discount = any(line.discount > 0 for line in self.invoice_line_ids)
 
+            # Determine tax-inclusivity from the taxes on invoice lines
+            # Check if any tax has price_include=True (tax included in price)
+            is_tax_inclusive = any(
+                tax.price_include
+                for line in self.invoice_line_ids
+                for tax in line.tax_ids
+            )
+
             # Header totals: derive from the line items we just built (which are
             # already exact-decimal) rather than re-deriving from Odoo's float
             # amount_* fields, so header and line data can never disagree.
@@ -514,7 +522,7 @@ class AccountMove(models.Model):
                     "CreditNoteNumber": self.name,
                     "OriginalInvoiceId": self.reversed_entry_id.name if self.reversed_entry_id else "",
                     "Reference": self.ref or '',
-                    "IsTaxInclusive": True,
+                    "IsTaxInclusive": is_tax_inclusive,
                     "IsDiscounted": has_discount,
                     "BuyerContact": buyer_contact,
                     "Date": timestamp,
@@ -531,7 +539,7 @@ class AccountMove(models.Model):
                     "InvoiceNumber": self.name,
                     "Reference": self.ref or "",
                     "IsDiscounted": has_discount,
-                    "IsTaxInclusive": True,
+                    "IsTaxInclusive": is_tax_inclusive,
                     "BuyerContact": buyer_contact,
                     "Date": timestamp,
                     "LineItems": line_items,
