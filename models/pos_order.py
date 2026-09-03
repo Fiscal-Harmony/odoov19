@@ -185,7 +185,11 @@ class PosOrder(models.Model):
         for attempt in range(1, max_retries + 1):
             # Force a fresh read in case sequence_id was just written
             # by another transaction and our cached recordset is stale
-            self.config_id.invalidate_recordset(['sequence_id'])
+            try:
+                if 'sequence_id' in self.config_id._fields:
+                    self.config_id.invalidate_recordset(['sequence_id'])
+            except Exception:
+                pass
 
             if hasattr(self.config_id, 'sequence_id') and self.config_id.sequence_id:
                 if attempt > 1:
@@ -607,6 +611,15 @@ class PosOrder(models.Model):
                         tax_code = tax_mapping.zimra_tax_code
                         break
 
+                if not tax_code:
+                    _logger.warning(
+                        "No ZIMRA tax mapping for product '%s' (tax IDs: %s). "
+                        "Mapped tax IDs: %s",
+                        line.product_id.name,
+                        [t.id for t in line.tax_ids],
+                        list(tax_mappings.keys()),
+                    )
+
             # Safely split product name into name and hscode
             try:
                 match = re.search(r'\b\d{8,}\b', line.product_id.name)
@@ -730,6 +743,14 @@ class PosOrder(models.Model):
                 if tax.id in tax_mappings:
                     tax_code = tax_mappings[tax.id].zimra_tax_code
                     break
+            if not tax_code and line.tax_ids:
+                _logger.warning(
+                    "No ZIMRA tax mapping for product '%s' (tax IDs: %s). "
+                    "Mapped tax IDs: %s",
+                    line.product_id.name,
+                    [t.id for t in line.tax_ids],
+                    list(tax_mappings.keys()),
+                )
 
             # --- Name & HS code ---
             name = line.product_id.name or ""
