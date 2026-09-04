@@ -1,0 +1,20 @@
+# Default owners for everything in the repo
+* @tanexy
+
+# Controllers
+/controllers/ @tanexy
+
+# Data files
+/data/ @tanexy
+
+# Models
+/models/ @tanexy
+
+# Security
+/security/ @tanexy
+
+# Static files
+/static/ @tanexy
+
+# Views
+/views/ @tanexy
