@@ -421,7 +421,7 @@ class ZimraConfig(models.Model):
                 error_response = response.json()
                 log_data["response"] = json.dumps(error_response, indent=2)
 
-                # Handle  Core validation errors
+                # Handle  Core validation errors 
                 if response.status_code == 400:
                     if "errors" in error_response:
                         validation_errors = []
