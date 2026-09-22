@@ -504,14 +504,10 @@ class AccountMove(models.Model):
                 for tax in line.tax_ids
             )
 
-            # Header totals: derive from the line items we just built (which are
-            # already exact-decimal) rather than re-deriving from Odoo's float
-            # amount_* fields, so header and line data can never disagree.
-            line_amount_sum = sum(
-                (Decimal(li["LineAmount"]) for li in line_items), Decimal('0.00')
-            )
-            # Subtotal/tax split still comes from Odoo's own totals (tax computation
-            # itself isn't the reported bug), just quantized safely via Decimal.
+            # Header totals come from Odoo's own totals, quantized safely via
+            # Decimal. SubTotal is always the net (pre-tax) amount and Total the
+            # gross (post-tax) amount, matching the IsTaxInclusive basis used
+            # for the line items.
             subtotal_dec = self._quantize_money(abs(self.amount_untaxed))
             tax_dec = self._quantize_money(abs(self.amount_tax))
             total_dec = self._quantize_money(abs(self.amount_total))
@@ -634,6 +630,16 @@ class AccountMove(models.Model):
         # Calculate amounts based on invoice type
         is_refund = self.move_type == 'out_refund'
 
+        # ZIMRA line amounts (UnitAmount/LineAmount/DiscountAmount) must be
+        # expressed on the SAME basis as the IsTaxInclusive flag:
+        #   - tax-INCLUSIVE lines report their gross (tax-included) amount,
+        #   - tax-EXCLUSIVE lines report their net (pre-tax) amount.
+        # Odoo's price_unit/price_subtotal/price_total are already net of any
+        # line discount, so the correct basis values are:
+        #   - tax-exclusive basis = price_subtotal (net)
+        #   - tax-inclusive basis = price_total   (gross)
+        line_tax_inclusive = any(tax.price_include for tax in line.tax_ids)
+
         # Convert Odoo float fields to Decimal via str() first (see _dec docstring)
         # before any arithmetic
         quantity_dec = self._dec(abs(line.quantity) if is_refund else line.quantity)
@@ -641,17 +647,17 @@ class AccountMove(models.Model):
         subtotal_raw_dec = self._dec(abs(line.price_subtotal) if is_refund else line.price_subtotal)
         price_total_raw_dec = self._dec(abs(line.price_total) if is_refund else line.price_total)
 
-
+        # Gross (before discount) value of the line on the matching basis
         gross_amount_dec = (unit_amount_dec * quantity_dec).quantize(
             self._MONEY_Q, rounding=ROUND_HALF_UP
         )
-        subtotal_dec = subtotal_raw_dec.quantize(self._MONEY_Q, rounding=ROUND_HALF_UP)
-        discount_amount_dec = gross_amount_dec - subtotal_dec
 
+        # Net-of-discount line amount on the matching basis
+        line_amount_dec = (
+            price_total_raw_dec if line_tax_inclusive else subtotal_raw_dec
+        ).quantize(self._MONEY_Q, rounding=ROUND_HALF_UP)
 
-        price_total_dec = price_total_raw_dec.quantize(self._MONEY_Q, rounding=ROUND_HALF_UP)
-        tax_portion_dec = price_total_dec - subtotal_dec
-        line_total_dec = gross_amount_dec + tax_portion_dec
+        discount_amount_dec = gross_amount_dec - line_amount_dec
 
         # Build line item
         return {
@@ -659,7 +665,7 @@ class AccountMove(models.Model):
             "UnitAmount": f"{self._quantize_qty(unit_amount_dec)}",
             "TaxCode": tax_code,
             "ProductCode": hscode or "",
-            "LineAmount": f"{line_total_dec}",
+            "LineAmount": f"{line_amount_dec}",
             "DiscountAmount": f"{discount_amount_dec}",
             "Quantity": f"{self._quantize_qty(quantity_dec)}",
         }
