@@ -575,8 +575,8 @@ class AccountMove(models.Model):
             "Tin": tin or None,
             "VatNumber": vat or None,
             "Address": self._get_customer_address(),
-            "Phone": self.partner_id.phone or "",
-            "Email": self.partner_id.email or ""
+            "Phone": self.partner_id.phone or None,
+            "Email": self.partner_id.email or None
         }
 
     def _parse_vat_field(self, vat_string):
@@ -708,14 +708,15 @@ class AccountMove(models.Model):
     def _get_customer_address(self):
         """Get customer address as a structured dictionary"""
         if not self.partner_id:
-            return {}
+            return None
 
-        return {
-            "Province": self.partner_id.state_id.name if self.partner_id.state_id else '',
-            "Street": self.partner_id.street2 or '',
-            "HouseNo": self.partner_id.street or '',
-            "City": self.partner_id.city or ''
+        address = {
+            "Province": self.partner_id.state_id.name if self.partner_id.state_id else None,
+            "Street": self.partner_id.street2,
+            "HouseNo": self.partner_id.street,
+            "City": self.partner_id.city
         }
+        return address if all(address.values()) else None
 
     def _show_notification(self, title, message, notification_type, sticky=False):
         """Helper to show notifications"""
