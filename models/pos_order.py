@@ -150,7 +150,8 @@ class PosOrder(models.Model):
             message = f'Order {self.name} has been successfully fiscalized'
             if self.fiscal_pdf_attachment_id:
                 pdf_url = f'/web/content/{self.fiscal_pdf_attachment_id.id}?filename=FiscalInvoice.pdf'
-                message += f'. <a href="{pdf_url}" target="_blank" class="btn btn-primary btn-sm">View PDF</a>'
+                message += '. %s'
+                links = [{'label': 'View PDF', 'url': pdf_url}] 
 
             return {
                 'type': 'ir.actions.client',
@@ -160,6 +161,7 @@ class PosOrder(models.Model):
                     'message': message,
                     'type': 'success',
                     'sticky': bool(self.fiscal_pdf_attachment_id),
+                    'links': links,
                 }
             }
         else:
@@ -410,7 +412,15 @@ class PosOrder(models.Model):
             return False
 
         response = response_data[0]
-        return not response.get("Error")  # True if Error is None or ''
+        error = response.get("Error") or ""
+        if not error:
+            return True    # True if Error is None or ''
+        
+        return (
+            error.startswith("Already processed invoice number")
+            and bool(response.get("QrData"))
+            and bool(response.get("FiscalInvoicePdf"))
+        )
 
     def _export_for_ui(self, order):
         result = super()._export_for_ui(order)

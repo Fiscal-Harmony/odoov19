@@ -155,23 +155,22 @@
                                 <field name="duration" widget="float_time"/>
                             </group>
                         </group>
+                        
+                        <notebook>
+                            <page string="Request Data" name="request_data">
+                                <field name="request_data" widget="ace" options="{'mode': 'json'}" nolabel="1"/>
+                            </page>
+                            <page string="Response Data" name="response_data">
+                                <field name="response_data" widget="ace" options="{'mode': 'json'}" nolabel="1"/>
+                            </page>
+                            <page string="Error Details" name="error_details" invisible="not error_message">
+                                <field name="error_message" nolabel="1"/>
+                            </page>
+                        </notebook>
 
-                        <group string="Request Data">
-                            <field name="request_data" nolabel="1" placeholder="No request data available"/>
-                        </group>
-                        <group string="Response Data">
-                            <field name="response_data" nolabel="1" placeholder="No response data available"/>
-                        </group>
-                        <group string="Error Details" invisible="not error_message">
-                            <field name="error_message" nolabel="1" placeholder="No errors"/>
-                        </group>
                     </div>
                 </sheet>
-                <div class="oe_chatter">
-                    <field name="message_follower_ids"/>
-                    <field name="activity_ids"/>
-                    <field name="message_ids"/>
-                </div>
+                <chatter/>
             </form>
         </field>
     </record>
@@ -351,14 +350,25 @@
                 <button name="action_fiscalize_invoice"
                         string="Fiscalize Invoice"
                         type="object"
-                        class="btn-primary"
+                        class="btn-primary o_fh_btn_fiscalize"
                         invisible="move_type not in ('out_invoice', 'out_refund') or state != 'posted' or zimra_status in ('fiscalized', 'sent')"
                         confirm="Are you sure you want to fiscalize this invoice with ZIMRA?"/>
+                <button name="action_fiscalize_invoice"
+                        string="Fiscalize Credit Note"
+                        type="object"
+                        class="btn-primary o_fh_btn_fiscalize"
+                        invisible="move_type != 'out_refund' or state != 'posted' or zimra_status in ('fiscalized', 'sent')"
+                        confirm="Are you sure you want to fiscalize this credit note with ZIMRA?"/>
                 <button name="action_download_fiscal_pdf"
                         string="Download Fiscal Invoice"
                         type="object"
-                        class="btn-primary"
-                        invisible="zimra_status not in ('fiscalized')"/>
+                        class="btn-primary o_fh_btn_fiscalize"
+                        invisible="move_type == 'out_refund' or zimra_status not in ('fiscalized')"/>
+                <button name="action_download_fiscal_pdf"
+                        string="Download Credit Note"
+                        type="object"
+                        class="btn-primary o_fh_btn_fiscalize"
+                        invisible="move_type != 'out_refund' or zimra_status not in ('fiscalized')"/>
             </xpath>
         </field>
     </record>

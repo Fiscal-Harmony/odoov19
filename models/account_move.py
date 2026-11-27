@@ -110,18 +110,21 @@ class AccountMove(models.Model):
 
             if result:
                 message = f'Invoice {self.name} has been successfully fiscalized'
+                links = []
                 if self.zimra_fiscal_number:
                     message += f' with fiscal number: {self.zimra_fiscal_number}'
 
                 if self.fiscal_pdf_attachment_id:
                     pdf_url = f'/web/content/{self.fiscal_pdf_attachment_id.id}?filename=FiscalInvoice_{self.name}.pdf'
-                    message += f'. <a href="{pdf_url}" target="_blank" class="btn btn-primary btn-sm">View PDF</a>'
+                    message += '. %s'
+                    links = [{'label': 'View PDF', 'url': pdf_url}]
 
                 return self._show_notification(
                     'Fiscalization Successful',
                     message,
                     'success',
-                    sticky=bool(self.fiscal_pdf_attachment_id)
+                    sticky=bool(self.fiscal_pdf_attachment_id),
+                    links=links  
                 )
             else:
                 error_detail = self.zimra_error or 'Unknown error occurred'
@@ -387,7 +390,17 @@ class AccountMove(models.Model):
             response = response_data
 
         # Success if Error field is empty/None/False
-        return not response.get("Error")
+        error = response.get("Error") or ""
+        if not error:
+            return True
+        
+        # Already fiscalised earlier: the API sends back the original QR and PDF,
+        # so treat it as fiscalized and let the normal success path attach the PDF
+        return (
+            error.startswith("Already processed invoice number")
+            and bool(response.get("QrData"))
+            and bool(response.get("FiscalInvoicePdf"))
+        )
 
     def _should_fiscalize(self):
         """Check if invoice should be fiscalized with detailed logging"""
@@ -718,7 +731,7 @@ class AccountMove(models.Model):
         }
         return address if all(address.values()) else None
 
-    def _show_notification(self, title, message, notification_type, sticky=False):
+    def _show_notification(self, title, message, notification_type, sticky=False, links=None):
         """Helper to show notifications"""
         return {
             'type': 'ir.actions.client',
@@ -728,6 +741,7 @@ class AccountMove(models.Model):
                 'message': message,
                 'type': notification_type,
                 'sticky': sticky,
+                'links': links or [],
             }
         }
 

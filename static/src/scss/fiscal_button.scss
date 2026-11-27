@@ -1,0 +1,11 @@
+.o_form_view .btn.o_fh_btn_fiscalize {
+    background-color: #39b54a;
+    border-color: #39b54a;
+    color: #ffffff;
+
+    &:hover, &:focus, &:active {
+        background-color: #2e9a3d;
+        border-color: #2e9a3d;
+        color: #ffffff;
+    }
+}
