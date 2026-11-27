@@ -110,18 +110,21 @@ class AccountMove(models.Model):
 
             if result:
                 message = f'Invoice {self.name} has been successfully fiscalized'
+                links = []
                 if self.zimra_fiscal_number:
                     message += f' with fiscal number: {self.zimra_fiscal_number}'
 
                 if self.fiscal_pdf_attachment_id:
                     pdf_url = f'/web/content/{self.fiscal_pdf_attachment_id.id}?filename=FiscalInvoice_{self.name}.pdf'
-                    message += f'. <a href="{pdf_url}" target="_blank" class="btn btn-primary btn-sm">View PDF</a>'
+                    message += '. %s'
+                    links = [{'label': 'View PDF', 'url': pdf_url}]
 
                 return self._show_notification(
                     'Fiscalization Successful',
                     message,
                     'success',
-                    sticky=bool(self.fiscal_pdf_attachment_id)
+                    sticky=bool(self.fiscal_pdf_attachment_id),
+                    links=links  
                 )
             else:
                 error_detail = self.zimra_error or 'Unknown error occurred'
@@ -387,7 +390,17 @@ class AccountMove(models.Model):
             response = response_data
 
         # Success if Error field is empty/None/False
-        return not response.get("Error")
+        error = response.get("Error") or ""
+        if not error:
+            return True
+        
+        # Already fiscalised earlier: the API sends back the original QR and PDF,
+        # so treat it as fiscalized and let the normal success path attach the PDF
+        return (
+            error.startswith("Already processed invoice number")
+            and bool(response.get("QrData"))
+            and bool(response.get("FiscalInvoicePdf"))
+        )
 
     def _should_fiscalize(self):
         """Check if invoice should be fiscalized with detailed logging"""
@@ -571,8 +584,8 @@ class AccountMove(models.Model):
             "Tin": tin or None,
             "VatNumber": vat or None,
             "Address": self._get_customer_address(),
-            "Phone": self.partner_id.phone or "",
-            "Email": self.partner_id.email or ""
+            "Phone": self.partner_id.phone or None,
+            "Email": self.partner_id.email or None
         }
 
     def _parse_vat_field(self, vat_string):
@@ -714,16 +727,17 @@ class AccountMove(models.Model):
     def _get_customer_address(self):
         """Get customer address as a structured dictionary"""
         if not self.partner_id:
-            return {}
+            return None
 
-        return {
-            "Province": self.partner_id.state_id.name if self.partner_id.state_id else '',
-            "Street": self.partner_id.street2 or '',
-            "HouseNo": self.partner_id.street or '',
-            "City": self.partner_id.city or ''
+        address = {
+            "Province": self.partner_id.state_id.name if self.partner_id.state_id else None,
+            "Street": self.partner_id.street2,
+            "HouseNo": self.partner_id.street,
+            "City": self.partner_id.city
         }
+        return address if all(address.values()) else None
 
-    def _show_notification(self, title, message, notification_type, sticky=False):
+    def _show_notification(self, title, message, notification_type, sticky=False, links=None):
         """Helper to show notifications"""
         return {
             'type': 'ir.actions.client',
@@ -733,6 +747,7 @@ class AccountMove(models.Model):
                 'message': message,
                 'type': notification_type,
                 'sticky': sticky,
+                'links': links or [],
             }
         }
 

@@ -36,6 +36,8 @@
             'odoov19/static/src/js/dashboard.js',
             'odoov19/static/src/xml/show_fiscal_pdf.xml',
             'odoov19/static/src/xml/dashboard.xml',
+            'odoov19/static/src/scss/fiscal_button.scss',
+            'odoov19/static/src/js/fiscalize_loading.js',
         ],
     },
     'installable': True,

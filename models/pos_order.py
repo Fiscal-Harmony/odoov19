@@ -150,7 +150,8 @@ class PosOrder(models.Model):
             message = f'Order {self.name} has been successfully fiscalized'
             if self.fiscal_pdf_attachment_id:
                 pdf_url = f'/web/content/{self.fiscal_pdf_attachment_id.id}?filename=FiscalInvoice.pdf'
-                message += f'. <a href="{pdf_url}" target="_blank" class="btn btn-primary btn-sm">View PDF</a>'
+                message += '. %s'
+                links = [{'label': 'View PDF', 'url': pdf_url}] 
 
             return {
                 'type': 'ir.actions.client',
@@ -160,6 +161,7 @@ class PosOrder(models.Model):
                     'message': message,
                     'type': 'success',
                     'sticky': bool(self.fiscal_pdf_attachment_id),
+                    'links': links,
                 }
             }
         else:
@@ -410,7 +412,15 @@ class PosOrder(models.Model):
             return False
 
         response = response_data[0]
-        return not response.get("Error")  # True if Error is None or ''
+        error = response.get("Error") or ""
+        if not error:
+            return True    # True if Error is None or ''
+        
+        return (
+            error.startswith("Already processed invoice number")
+            and bool(response.get("QrData"))
+            and bool(response.get("FiscalInvoicePdf"))
+        )
 
     def _export_for_ui(self, order):
         result = super()._export_for_ui(order)
@@ -510,7 +520,7 @@ class PosOrder(models.Model):
         # field is missing for some reason (defensive, not a silent guess).
         pos_config = self.session_id.config_id if self.session_id else self.config_id
         iface_tax_included = getattr(pos_config, 'iface_tax_included', 'total')
-        is_tax_inclusive = (iface_tax_included == 'total')
+        is_tax_inclusive = any(tax.price_include for line in self.lines for tax in line.tax_ids)
 
         # Prepare line items on whichever basis matches is_tax_inclusive
         line_items = self.__get_line_items(tax_mappings, is_tax_inclusive)
@@ -524,7 +534,7 @@ class PosOrder(models.Model):
             float(item.get("DiscountAmount", "0"))
             for item in line_items
         )
-        subtotal = self.amount_total - total_discount
+        subtotal = self.amount_total
 
         is_refund = self.name.strip().endswith('REFUND')
         # Ensure order has a valid name
@@ -568,7 +578,7 @@ class PosOrder(models.Model):
             "BuyerContact": buyer_contact,
             "Date": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "LineItems": creditnote_line_items,
-            "SubTotal": f"{abs(creditnote_subtotal - self.amount_tax):.2f}",
+            "SubTotal": f"{abs(self.amount_total) - abs(self.amount_tax):.2f}",
             "TotalTax": f"{abs(self.amount_tax):.2f}",
             "Total": f"{abs(self.amount_total):.2f}",
             "CurrencyCode": currency_code,
@@ -647,16 +657,11 @@ class PosOrder(models.Model):
             # and UnitAmount must be a PER-UNIT price, not the full line total.
             quantity = abs(line.qty) or 1  # avoid division by zero
 
-            # Calculate discount if applicable (ensure positive values), on
-            # the same basis as unit_amount/line_amount below.
+            # The credit note endpoint checks UnitAmount x Quantity = LineAmount
+            # and ignores DiscountAmount, so send the price after the discount
+            unit_amount = _quant(basis_total / quantity, THREE_PLACES)
+            line_amount = basis_total
             discount_amount = 0
-            if line.discount:
-                unit_basis_price = basis_total / quantity
-                discount_amount = abs(unit_basis_price * line.qty * line.discount / 100)
-
-            # Divide by quantity to get a genuine per-unit price, matching is_tax_inclusive.
-            unit_amount = basis_total / quantity
-            line_amount = basis_total - discount_amount
 
             # Build the line item with absolute, tax-inclusive, internally-consistent values
             line_item = {
@@ -769,20 +774,20 @@ class PosOrder(models.Model):
 
             final_line_amount = line_basis - proportional_discount
 
-            # --- Product discount (line-level), computed on the SAME basis
-            #     (inclusive or exclusive) as UnitAmount/LineAmount below, so
-            #     it stays consistent with whatever IsTaxInclusive is sent.
-            #     Previously this always used line.price_unit (tax-exclusive)
-            #     regardless of the flag, which caused UnitAmount x Quantity
-            #     to not reconcile with LineAmount + DiscountAmount whenever
-            #     the POS was configured tax-inclusive. ---
             qty = abs(line.qty) or 1  # avoid division by zero
-            basis_unit_price = line_basis / qty
 
-            line_discount = (
-                basis_unit_price * line.qty * line.discount / 100
-                if line.discount else 0
-            )
+            # Odoo's line price BEFORE the line discount, on the same tax basis
+            # as line_basis (same tax computation as the credit note lines use)
+            undiscounted = line.tax_ids.compute_all(
+                price_unit=abs(line.price_unit),
+                quantity=qty,
+                product=line.product_id,
+                partner=self.partner_id,
+            )['total_included' if is_tax_inclusive else 'total_excluded']
+            basis_unit_price = _quant(undiscounted / qty, THREE_PLACES)
+
+            # Built so that UnitAmount x Quantity - DiscountAmount = LineAmount
+            line_discount = float(_quant(basis_unit_price * _to_decimal(qty))) - line_basis
 
             line_items.append({
                 "Description": name,
